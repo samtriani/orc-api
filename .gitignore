@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+# El front vive en su propio repo: samtriani/orc-gui
+web/
+
+# DATOS REALES DE LA COMER — fuera del repo a propósito.
+# Las capturas traen SKU, tiendas, proveedores, folios de pedido y venta
+# perdida de un cliente. No se publican aunque el repo sea privado.
+# Para versionar un archivo de ejemplo, que sea anonimizado y explícito:
+#   git add -f ejemplo_anonimizado.xlsx
+*.xlsx
