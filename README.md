@@ -9,6 +9,9 @@ consume el front. Las dos corren exactamente el mismo motor.
 
 > **El front vive en [samtriani/orc-gui](https://github.com/samtriani/orc-gui).**
 
+> **¿Retomando en otra máquina?** Lee [`SEGUIMIENTO.md`](SEGUIMIENTO.md)
+> primero — resume sesión a sesión qué se hizo con Claude Code y qué falta.
+
 ## Los archivos de datos no están en el repo
 
 Las capturas traen SKU, tiendas, proveedores, folios de pedido y venta perdida
