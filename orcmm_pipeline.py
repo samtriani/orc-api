@@ -96,6 +96,15 @@ def _osa_pct(v) -> Optional[float]:
     return v * 100.0
 
 
+def osa_general(fu: "Fuentes") -> Optional[float]:
+    """OSA% real del periodo: sobre TODAS las filas de BOPS_OSA (todo SKU,
+    tienda y día leído), no sólo los días con faltante que entran a la
+    matriz. Es la foto general antes de meterse a la causa raíz de cada día."""
+    valores = [v for v in (_osa_pct(fila.get("osa_pct")) for fila in fu.osa.values())
+               if v is not None]
+    return round(sum(valores) / len(valores), 1) if valores else None
+
+
 def leer_hoja(wb, nombre: str, advertencias: List[str]) -> List[dict]:
     """Lee una hoja de captura: encabezados en la fila 3, datos desde la 6."""
     if nombre not in wb.sheetnames:
@@ -932,6 +941,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         ws.column_dimensions[col].width = w
 
     cob = cobertura_modelo(diagnosticos)
+    cob["osa_general"] = osa_general(fu)
 
     ws["B2"] = "Cobertura del modelo"
     ws["B2"].font = TITULO
@@ -939,7 +949,9 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     if aviso:
         _banner(ws, f, 2, 6, aviso, alto=60)
         f += 2
-    for k, v in [("Días con faltante analizados", cob["casos_totales"]),
+    osa_gral = cob["osa_general"]
+    for k, v in [("OSA general del periodo", f"{osa_gral}%" if osa_gral is not None else "n/d"),
+                 ("Días con faltante analizados", cob["casos_totales"]),
                  ("Días clasificados", cob["casos_clasificados"]),
                  ("Cobertura sobre días", f"{cob['cobertura_casos_pct']}%"),
                  ("Venta perdida total", f"${cob['venta_perdida_total']:,.2f}"),
@@ -1059,12 +1071,18 @@ def main() -> int:
 
     evidencias = derivar_evidencias(fu, args.umbral_osa)
     if not evidencias:
+        osa_gral = osa_general(fu)
+        if osa_gral is not None:
+            print(f"\nOSA general del periodo: {osa_gral}%")
         print("\nNo hay días con faltante que analizar. Revisa la hoja BOPS_OSA.")
         return 1
 
     diagnosticos = clasificar(evidencias)   # una sola pasada del motor
 
     cob, par = escribir_resultado(salida, fu, evidencias, diagnosticos)
+
+    if cob["osa_general"] is not None:
+        print(f"\nOSA general del periodo: {cob['osa_general']}%")
 
     print(f"\nAnalizados {cob['casos_totales']} días con faltante · "
           f"clasificados {cob['casos_clasificados']} ({cob['cobertura_casos_pct']}%)")

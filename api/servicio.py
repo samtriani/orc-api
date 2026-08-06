@@ -28,7 +28,7 @@ from orcmm_layout_spec import HOJAS                             # noqa: E402
 from orcmm_pipeline import (Fuentes, aviso_prioridad_3, citas_incumplidas,  # noqa: E402
                             derivar_evidencias, desempeno_proveedores,
                             discrepancias_pedido_cita, escribir_resultado,
-                            leer_fuentes)
+                            leer_fuentes, osa_general)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
                                diagnosticar_periodo, resumen_por_causa,
                                resumen_por_responsable, resumen_por_subcausa)
@@ -168,6 +168,7 @@ def analizar(ruta: Path, salida: Path, umbral_osa: float = 100.0) -> dict:
     if not evidencias:
         return {
             "hay_resultados": False,
+            "osa_general": osa_general(fu),
             "motivo": ("No hay días con faltante que analizar. Revisar BOPS_OSA: o viene "
                        "vacía, o todos los días traen OSA al 100%."),
             "fuentes": _fuentes_a_dict(fu),
@@ -193,6 +194,7 @@ def analizar(ruta: Path, salida: Path, umbral_osa: float = 100.0) -> dict:
 
     return {
         "hay_resultados": True,
+        "osa_general": osa_general(fu),
         "umbral_osa": umbral_osa,
         "aviso_parcial": aviso_prioridad_3(fu),
         "advertencias": fu.advertencias,
