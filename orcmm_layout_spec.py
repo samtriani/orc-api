@@ -53,7 +53,9 @@ HOJAS = {
             ("division", TXT, True, "División del SKU.", "Abarrotes"),
             ("via_resurtido", LST, True, "Vía 1 (por CEDIS) / Vía 2 / DSD (directo del proveedor a tienda).", "Vía 1"),
             ("piezas_por_caja", ENT, True, "Unidad de empaque vigente. Convierte las cajas del reporte NS a piezas.", "12"),
-            ("tipo_resurtido", LST, False, "Manual / Automático.", "Automático"),
+            ("tipo_resurtido", LST, False,
+             "Manual / Automático. Afina el responsable de RC03 'Pedido No Generado' "
+             "(prioridad 3) cuando SIMA confirma que no hubo pedido de tienda.", "Automático"),
             ("rol_frecuencia", TXT, False, "Rol por frecuencia (base F9).", "A"),
             ("linea_vs_io", LST, False, "Línea / In&Out. No se usa para clasificar; sirve para segmentar el Pareto.", "Línea"),
             ("estatus_activo", BOL, True, "SKU vigente en catálogo para esa tienda.", "Sí"),

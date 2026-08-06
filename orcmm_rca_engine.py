@@ -69,6 +69,28 @@ class SubcausaProveedor(str, Enum):
     ENTREGA_PARCIAL = "Entregó menos de lo que confirmó en la cita"
 
 
+class TipoResurtido(str, Enum):
+    """Fuente: CATALOGO.tipo_resurtido. Refina el responsable de la prioridad 3
+    (RC03 'Pedido No Generado') cuando SIMA confirma que no hubo pedido de
+    tienda: ver RESPONSABLE_PEDIDO_NO_GENERADO más abajo.
+    """
+    MANUAL = "Manual"
+    AUTOMATICO = "Automático"
+
+
+class SubcausaPedidoTienda(str, Enum):
+    """Refinamiento de la prioridad 3 con CATALOGO.tipo_resurtido.
+
+    'No se generó pedido' es una causa distinta según quién debía generarlo:
+      - resurtido automático -> falló el algoritmo de resurtido (o su
+        parametrización), no una persona en tienda.
+      - resurtido manual     -> nadie en tienda lo generó a mano.
+    Sin el dato de catálogo no se puede distinguir cuál de las dos aplica.
+    """
+    AUTOMATICO_NO_GENERO = "Resurtido automático: el sistema no generó el pedido"
+    MANUAL_NO_GENERO = "Resurtido manual: no se generó el pedido a mano"
+
+
 # ===========================================================================
 # INTERRUPTOR TEMPORAL — PRIORIDAD 3 / SIMA_PEDIDOS_TIENDA   (2026-08-05)
 #
@@ -116,6 +138,29 @@ RESPONSABLE_SIN_CITA = Responsable.PROVEEDOR
 #   True  -> se dictamina RC05 / Compras-Abasto con subcausa CITA_PENDIENTE
 #   False -> se reporta como hueco de la matriz y el día queda sin clasificar
 CLASIFICAR_CITA_PENDIENTE = True
+
+# ¿A quién le cae un pedido de tienda que nunca se generó (RC03, prioridad 3)?
+# Depende de quién debía generarlo, y eso lo dice CATALOGO.tipo_resurtido:
+#   Automático -> el algoritmo de resurtido debía generarlo solo. Si no lo
+#                 hizo, es una falla de sistema/parametrización, no de la
+#                 tienda -> Responsable.COMPRAS_ABASTO.
+#   Manual     -> alguien en tienda tenía que generarlo a mano y no lo hizo
+#                 -> Responsable.TIENDA.
+#   Sin dato   -> CATALOGO no trae tipo_resurtido para ese SKU-tienda; no se
+#                 puede saber cuál de las dos rutas aplica y se mantiene el
+#                 responsable conjunto histórico -> Responsable.TIENDA_ABASTO.
+# Depende de EVALUAR_PEDIDO_TIENDA (arriba): mientras SIMA no entrega, la
+# prioridad 3 no dictamina y este mapa no se consulta. PENDIENTE DE
+# RATIFICAR CON LA COMER, igual que RESPONSABLE_SIN_CITA.
+RESPONSABLE_PEDIDO_NO_GENERADO = {
+    TipoResurtido.AUTOMATICO: Responsable.COMPRAS_ABASTO,
+    TipoResurtido.MANUAL: Responsable.TIENDA,
+}
+
+SUBCAUSA_PEDIDO_NO_GENERADO = {
+    TipoResurtido.AUTOMATICO: SubcausaPedidoTienda.AUTOMATICO_NO_GENERO,
+    TipoResurtido.MANUAL: SubcausaPedidoTienda.MANUAL_NO_GENERO,
+}
 
 
 class ViaResurtido(str, Enum):
@@ -165,6 +210,9 @@ class EvidenciaSKUTienda:
     # --- Prioridad 3: ¿la tienda/sistema generó pedido?   Fuente: SIMA
     pedido_tienda_generado: Optional[bool] = None
 
+    # --- Prioridad 3, refinamiento: manual o automático   Fuente: CATALOGO
+    tipo_resurtido: Optional[TipoResurtido] = None
+
     # --- Prioridad 4: bifurcación de la vía           Fuente: CATALOGO SECO VIA1
     via_resurtido: Optional[ViaResurtido] = None
 
@@ -203,7 +251,7 @@ class Dictamen:
     responsable: Responsable
     fuente: str
     evidencia: List[str] = field(default_factory=list)
-    subcausa: Optional[SubcausaProveedor] = None
+    subcausa: Optional[Union[SubcausaProveedor, SubcausaPedidoTienda]] = None
 
 
 @dataclass
@@ -272,6 +320,8 @@ class R3_PedidoTiendaNoGenerado(Regla):
     """Prioridad 3 — Inventario = 0, sin tránsito y no existe pedido.
 
     Apagada temporalmente con EVALUAR_PEDIDO_TIENDA mientras SIMA no entrega.
+    Cuando dictamina, CATALOGO.tipo_resurtido afina a quién le cae: ver
+    RESPONSABLE_PEDIDO_NO_GENERADO.
     """
     prioridad = 3
 
@@ -284,10 +334,23 @@ class R3_PedidoTiendaNoGenerado(Regla):
             return Indeterminado(self.prioridad, ["pedido_tienda_generado"], list(ctx))
 
         if not ev.pedido_tienda_generado:
+            responsable = RESPONSABLE_PEDIDO_NO_GENERADO.get(
+                ev.tipo_resurtido, Responsable.TIENDA_ABASTO)
+            subcausa = SUBCAUSA_PEDIDO_NO_GENERADO.get(ev.tipo_resurtido)
+
+            detalle = "No existe pedido de tienda"
+            fuente = "SIMA"
+            if ev.tipo_resurtido is not None:
+                detalle += f" (resurtido {ev.tipo_resurtido.value})"
+                fuente += " / CATALOGO"
+            else:
+                detalle += " (CATALOGO no trae tipo_resurtido para este SKU-tienda: no se pudo afinar el responsable)"
+
             return Dictamen(
-                self.prioridad, "RC03", CausaRaiz.RC03, Responsable.TIENDA_ABASTO,
-                "SIMA",
-                ctx + ["No existe pedido de tienda"],
+                self.prioridad, "RC03", CausaRaiz.RC03, responsable,
+                fuente,
+                ctx + [detalle],
+                subcausa=subcausa,
             )
 
         ctx.append("Pedido de tienda generado")

@@ -34,7 +34,8 @@ from openpyxl.utils import get_column_letter
 
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
                                normalizar_encabezado)
-from orcmm_rca_engine import EVALUAR_PEDIDO_TIENDA, EvidenciaSKUTienda, ViaResurtido
+from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, EvidenciaSKUTienda,
+                              TipoResurtido, ViaResurtido)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo, diagnosticar_periodo,
                                pareto_periodo, resumen_por_causa,
                                resumen_por_responsable, resumen_por_subcausa)
@@ -269,6 +270,7 @@ def _revisar_cobertura_de_citas(fu: Fuentes) -> None:
 # ===========================================================================
 
 VIAS = {v.value.lower(): v for v in ViaResurtido}
+TIPOS_RESURTIDO = {t.value.lower(): t for t in TipoResurtido}
 
 
 def derivar_transito_vigente(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
@@ -419,10 +421,11 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
         cat = fu.catalogo.get((sku, tienda))
         if cat is None:
             fu.advertencias.append(f"CATALOGO: falta el SKU {sku} en la tienda {tienda}.")
-            via, cedis = None, None
+            via, cedis, tipo_resurtido = None, None, None
         else:
             via = VIAS.get(str(_texto(cat.get("via_resurtido")) or "").lower())
             cedis = _texto(cat.get("cedis_surtidor"))
+            tipo_resurtido = TIPOS_RESURTIDO.get(str(_texto(cat.get("tipo_resurtido")) or "").lower())
 
         inv_t = fu.inv_tienda.get((sku, tienda, D))
         existencia = None
@@ -448,6 +451,7 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             inventario_tienda=existencia,
             transito_vigente=derivar_transito_vigente(fu, sku, tienda, D),
             pedido_tienda_generado=derivar_pedido_tienda(fu, sku, tienda, D),
+            tipo_resurtido=tipo_resurtido,
             via_resurtido=via,
             inventario_cedis=existencia_cedis,
             envio_cedis_generado=derivar_envio_generado(fu, sku, tienda, D),
@@ -698,18 +702,19 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
             ws.cell(row=f, column=7).fill = PatternFill("solid", fgColor=AMBAR)
         f += 1
 
-    # --- Impacto de cada falla del proveedor sobre el faltante -------------
+    # --- Impacto de cada subcausa (pedido de tienda y proveedor) -----------
     subcausas = resumen_por_subcausa(diagnosticos)
 
     f += 2
-    ws.cell(row=f, column=2, value="Qué falla del proveedor costó más").font = TITULO
+    ws.cell(row=f, column=2, value="Qué detalle de la causa costó más").font = TITULO
     f += 1
     ws.cell(row=f, column=2, value=(
-        "Sólo los días con faltante que la matriz alcanzó a clasificar en la prioridad 8. "
-        "Si está vacío, el árbol se detuvo antes de llegar al proveedor.")).font = CHICA
+        "Sólo los días con faltante que la matriz alcanzó a clasificar en la prioridad 3 "
+        "(pedido de tienda, según CATALOGO.tipo_resurtido) u 8 (proveedor). Si está vacío, "
+        "el árbol se detuvo antes de llegar a alguna de las dos.")).font = CHICA
     f += 2
 
-    _encabezado(ws, f, ["", "Falla del proveedor", "Días", "Venta perdida"] + [""] * 10)
+    _encabezado(ws, f, ["", "Detalle / subcausa", "Días", "Venta perdida"] + [""] * 10)
     f += 1
     if subcausas:
         for fila in subcausas:
@@ -720,7 +725,7 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
                 ws.cell(row=f, column=j).border = BORDE
             f += 1
     else:
-        c = ws.cell(row=f, column=2, value="Ningún día llegó a la prioridad 8.")
+        c = ws.cell(row=f, column=2, value="Ningún día llegó a la prioridad 3 u 8 con dictamen de subcausa.")
         c.fill = PatternFill("solid", fgColor=GRIS)
         f += 1
 
@@ -777,7 +782,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     ws = wb.active
     ws.title = "Clasificacion diaria"
     ws.sheet_view.showGridLines = False
-    for j, w in enumerate([16, 9, 12, 8, 13, 11, 10, 11, 8, 11, 11, 10, 10, 12, 11, 10,
+    for j, w in enumerate([16, 9, 12, 8, 13, 11, 10, 11, 12, 8, 11, 11, 10, 10, 12, 11, 10,
                            8, 26, 20, 30, 10, 26, 60], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
 
@@ -787,13 +792,13 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
                 "la matriz RC01-RC06. Un día Sin clasificar nombra el dato que faltó.")
     ws["A2"].font = CHICA
     if aviso:
-        _banner(ws, 3, 1, 23, aviso, alto=32)
+        _banner(ws, 3, 1, 24, aviso, alto=32)
 
     _encabezado(ws, 4, [
         "sku", "tienda", "fecha", "OSA %", "venta perdida",
-        "inv tienda", "tránsito", "pedido tda", "vía", "inv CEDIS",
+        "inv tienda", "tránsito", "pedido tda", "tipo resurtido", "vía", "inv CEDIS",
         "envío CEDIS", "ped prov", "cajas ped", "cita prov", "cajas conf", "cajas ent",
-        "RC", "causa raíz", "responsable", "detalle del proveedor",
+        "RC", "causa raíz", "responsable", "detalle / subcausa",
         "prioridad", "fuente", "evidencia / dato faltante",
     ])
     ws.row_dimensions[4].height = 32
@@ -807,6 +812,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         valores = [ev.sku, ev.tienda, ev.fecha.isoformat(), ev.osa, ev.venta_perdida,
                    ev.inventario_tienda, si_no(ev.transito_vigente),
                    si_no(ev.pedido_tienda_generado),
+                   ev.tipo_resurtido.value if ev.tipo_resurtido else "",
                    ev.via_resurtido.value if ev.via_resurtido else "",
                    ev.inventario_cedis, si_no(ev.envio_cedis_generado),
                    si_no(ev.pedido_proveedor_generado),
@@ -819,13 +825,13 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         for j, v in enumerate(valores, 1):
             c = ws.cell(row=r, column=j, value=v)
             c.border = BORDE
-        rc = ws.cell(row=r, column=17)
+        rc = ws.cell(row=r, column=18)
         rc.font = NEGRITA
         rc.fill = PatternFill("solid", fgColor=COLOR_CAUSA.get(dg["root_cause_id"], GRIS))
         rc.alignment = Alignment(horizontal="center")
 
     ws.freeze_panes = "D5"
-    ws.auto_filter.ref = f"A4:W{4 + len(evidencias)}"
+    ws.auto_filter.ref = f"A4:X{4 + len(evidencias)}"
 
     # --- Pareto -----------------------------------------------------------
     ws = wb.create_sheet("Pareto")

@@ -228,7 +228,7 @@ def resumen_por_responsable(diagnosticos: List[dict]) -> List[dict]:
 
 
 def resumen_por_subcausa(diagnosticos: List[dict]) -> List[dict]:
-    """Detalle de la prioridad 8: qué falla del proveedor costó más."""
+    """Detalle de las prioridades 3 y 8: qué falló y cuánto costó."""
     dias: Counter = Counter()
     vp: Dict[str, float] = defaultdict(float)
 
