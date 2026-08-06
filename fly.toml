@@ -9,9 +9,15 @@
 #   auto_stop_machines = 'off'  para que un análisis recién hecho siga
 #                               disponible para descargar aunque nadie más
 #                               toque la API en ese rato.
+#
+# Ojo: min_machines_running NO impide que Fly cree dos máquinas al desplegar.
+# Eso se pide con `fly deploy --ha=false`.
+#
+# Región dfw (Dallas): qro (Querétaro) quedó obsoleta y ya no admite recursos
+# nuevos. Dallas es de las más cercanas a México de las que siguen vivas.
 
 app = 'orc-api'
-primary_region = 'qro'
+primary_region = 'dfw'
 
 [build]
 
