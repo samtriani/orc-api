@@ -15,6 +15,7 @@ temporal y se borra sola pasado un rato.
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 import time
@@ -33,12 +34,20 @@ MAX_BYTES = 25 * 1024 * 1024      # el layout lleno pesa ~40 KB; 25 MB es holgad
 VIDA_TRABAJO_S = 60 * 60          # una hora
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# De dónde se acepta al navegador. En local, el front de desarrollo; en
+# despliegue, la variable de entorno, para no tener que redesplegar el back
+# cada vez que el front cambia de dominio:
+#   fly secrets set ORCMM_ORIGENES="https://orc-gui.vercel.app"
+ORIGENES_LOCALES = "http://localhost:4200,http://127.0.0.1:4200"
+ORIGENES = [o.strip() for o in os.getenv("ORCMM_ORIGENES", ORIGENES_LOCALES).split(",")
+            if o.strip()]
+
 app = FastAPI(title="ORCMM — Clasificación de desabasto por causa raíz",
               version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:4200", "http://127.0.0.1:4200"],
+    allow_origins=ORIGENES,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
@@ -107,7 +116,8 @@ def _nombre_original(archivo: UploadFile) -> str:
 
 @app.get("/api/salud")
 def salud() -> dict:
-    return {"estado": "ok", "trabajos_en_memoria": len(TRABAJOS)}
+    return {"estado": "ok", "trabajos_en_memoria": len(TRABAJOS),
+            "origenes_permitidos": ORIGENES}
 
 
 @app.post("/api/validar")

@@ -1,0 +1,10 @@
+web/
+dist/
+node_modules/
+__pycache__/
+*.pyc
+*.xlsx
+.git/
+.gitignore
+README.md
+fly.toml

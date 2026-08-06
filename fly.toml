@@ -1,0 +1,42 @@
+# ORCMM — backend en Fly.io
+#
+# UNA SOLA MÁQUINA, a propósito. El servicio guarda el resultado de cada
+# análisis en un directorio temporal y su índice en memoria del proceso. Con
+# dos máquinas, la petición de descarga puede caer en la que no corrió el
+# análisis y responder 404. Mientras el estado no salga del proceso, esto no
+# se escala en horizontal.
+#
+#   auto_stop_machines = 'off'  para que un análisis recién hecho siga
+#                               disponible para descargar aunque nadie más
+#                               toque la API en ese rato.
+
+app = 'orc-api'
+primary_region = 'qro'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ['app']
+
+  [http_service.concurrency]
+    type = 'requests'
+    soft_limit = 20
+    hard_limit = 40
+
+[[http_service.checks]]
+  interval = '30s'
+  timeout = '5s'
+  grace_period = '10s'
+  method = 'GET'
+  path = '/api/salud'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

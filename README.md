@@ -118,6 +118,39 @@ temporal que se borra sola a la hora.
 
 ---
 
+## Despliegue en Fly.io
+
+```bash
+fly auth login
+fly launch --no-deploy --copy-config --name orc-api --region qro
+fly deploy
+```
+
+Después, para que el front desplegado pueda hablarle:
+
+```bash
+fly secrets set ORCMM_ORIGENES="https://<dominio-del-front>"
+```
+
+Sin esa variable el backend sólo acepta al front de desarrollo
+(`localhost:4200`), que es lo que se quiere en local.
+
+### Por qué una sola máquina
+
+`fly.toml` fija `min_machines_running = 1` y `auto_stop_machines = 'off'` a
+propósito. El servicio guarda el Excel de resultados en un directorio temporal
+y su índice en memoria del proceso: con dos máquinas, la petición de descarga
+puede caer en la que **no** corrió el análisis y responder 404.
+
+Mientras el estado no salga del proceso, esto no se escala en horizontal. Si
+algún día hace falta, las opciones son un volumen compartido, un almacén de
+objetos, o devolver el Excel en la misma respuesta del análisis.
+
+`auto_stop_machines = 'off'` evita que la máquina se duerma entre el análisis
+y la descarga y se lleve el archivo consigo.
+
+---
+
 ## Estado actual del modelo
 
 Dos interruptores viven en `orcmm_rca_engine.py` porque son **acuerdos de
