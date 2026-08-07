@@ -10,3 +10,9 @@ web/
 # Para versionar un archivo de ejemplo, que sea anonimizado y explícito:
 #   git add -f ejemplo_anonimizado.xlsx
 *.xlsx
+
+# Desde el layout V5 las fuentes grandes se entregan como CSV aparte
+# (TABLEAU_INV_TIENDA_*.csv, TABLEAU_VENTAS.csv) y traen exactamente los
+# mismos datos de cliente que el Excel.
+*.csv
+*.zip

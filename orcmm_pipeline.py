@@ -26,19 +26,22 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
+                               llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
                                normalizar_encabezado)
-from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, EvidenciaSKUTienda,
-                              TipoResurtido, ViaResurtido)
-from orcmm_rca_periodo import (clasificar, cobertura_modelo, diagnosticar_periodo,
-                               pareto_periodo, resumen_por_causa,
-                               resumen_por_responsable, resumen_por_subcausa)
+from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, FUERA_DE_CATALOGO,
+                              EvidenciaSKUTienda, TipoResurtido, ViaResurtido)
+from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
+                               diagnosticar_periodo, pareto_periodo,
+                               resumen_por_causa, resumen_por_responsable,
+                               resumen_por_subcausa)
 
 AMARILLO, GRIS, AZUL, AMBAR, VERDE, ROJO = "FFE600", "F2F2F2", "DDEBF7", "FFEB9C", "C6EFCE", "FFC7CE"
 COLOR_CAUSA = {"RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
@@ -54,6 +57,23 @@ WRAP = Alignment(wrap_text=True, vertical="top")
 # ===========================================================================
 # 1. LECTURA
 # ===========================================================================
+
+# El reporte de CEDIS lista los SKU con existencia y omite los que están en
+# cero, así que en un día que sí se extrajo, la falta de fila ES un cero
+# confirmado y no un dato ausente. Confirmado con La Comer el 2026-08-06.
+#
+# Es la única excepción a "vacío no es cero" en todo el modelo, y por eso está
+# aquí arriba y no enterrada en la derivación: sostiene las prioridades 5 a 8
+# (separar "CEDIS no tenía" de "CEDIS tenía y no lo mandó"). Sin ella, el
+# layout V5 clasifica el 0.3% de los días que llegan a esa rama, porque la
+# extracción quitó justo los SKU sin existencia — que son los que explican el
+# faltante.
+#
+# Se aplica SÓLO cuando el día está entre los que la extracción cubre para ese
+# CEDIS (ver Fuentes.cedis_cubre). Un día que no se extrajo sigue siendo un
+# dato ausente. Poner en False para volver al comportamiento estricto.
+CEDIS_AUSENCIA_ES_CERO = True
+
 
 def _fecha(v) -> Optional[date]:
     if v is None or v == "":
@@ -143,6 +163,20 @@ class Fuentes:
     citas_prov: List[dict] = field(default_factory=list)
     # citas indexadas por (folio del pedido, sku): un pedido puede traer varias
     citas_por_pedido: Dict[Tuple[str, str], List[dict]] = field(default_factory=dict)
+    # Días que la extracción de CEDIS_INVENTARIO sí cubre, por CEDIS. Ver
+    # CEDIS_AUSENCIA_ES_CERO: sólo dentro de esos días la falta de fila se
+    # puede leer como existencia cero.
+    dias_cedis: Dict[str, Set[date]] = field(default_factory=dict)
+
+    # Eventos agrupados por la clave con la que se consultan y con las fechas
+    # ya convertidas. Ver _indexar_eventos: sin esto cada día con faltante
+    # recorre la lista completa de eventos.
+    #   transferencias_por[(sku, tienda)]   -> [(generacion, salida, recepcion)]
+    #   pedidos_tienda_por[(sku, tienda)]   -> [(pedido, surtido)]
+    #   pedidos_prov_por[(sku, cedis)]      -> [(pedido, recibo, compromiso, fila)]
+    transferencias_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
+    pedidos_tienda_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
+    pedidos_prov_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
 
     conteo: Dict[str, int] = field(default_factory=dict)
     rango: Dict[str, Tuple[Optional[date], Optional[date]]] = field(default_factory=dict)
@@ -151,11 +185,61 @@ class Fuentes:
     def vacia(self, hoja: str) -> bool:
         return self.conteo.get(hoja, 0) == 0
 
+    def cedis_cubre(self, cedis: Optional[str], D: date) -> bool:
+        """¿La extracción de CEDIS trae ese día para ese CEDIS?
 
-def leer_fuentes(ruta: Path) -> Fuentes:
-    wb = openpyxl.load_workbook(ruta, data_only=True)
+        Es la condición que hace legítimo interpretar la ausencia como cero:
+        si el día no se extrajo, la falta de fila no dice nada. Se compara
+        contra los días presentes y no contra el rango, porque una extracción
+        con huecos (un domingo que no corrió) haría mentir al rango.
+        """
+        return bool(cedis) and D in self.dias_cedis.get(cedis, ())
+
+
+@dataclass
+class PaqueteFuentes:
+    """Todo lo que hace falta para una corrida: el layout y sus CSV.
+
+    Desde el layout V5, TABLEAU_INV_TIENDA y TABLEAU_VENTAS pasan del millón
+    de filas que aguanta una hoja de Excel y se entregan aparte. El paquete
+    los junta para que el resto del programa vea una sola fuente.
+    """
+    xlsx: Path
+    csvs: Dict[str, List[Path]] = field(default_factory=dict)
+    sueltos: List[Path] = field(default_factory=list)
+
+    @classmethod
+    def desde(cls, xlsx: Path, csvs: Optional[Iterable[Path]] = None) -> "PaqueteFuentes":
+        por_hoja, sueltos = agrupar_por_hoja(csvs or [])
+        return cls(Path(xlsx), por_hoja, sueltos)
+
+
+def leer_fuentes(paquete, umbral_osa: float = 100.0) -> Fuentes:
+    """Lee el layout y sus CSV en una sola estructura.
+
+    Acepta un PaqueteFuentes o, por compatibilidad con las corridas que sólo
+    tienen Excel, la ruta del .xlsx a secas.
+
+    `umbral_osa` tiene que llegar hasta aquí —y no sólo a derivar_evidencias
+    como antes— porque es lo que define qué llaves vale la pena guardar del
+    inventario. Sin ese filtro, el layout V5 no cabe en memoria.
+    """
+    if not isinstance(paquete, PaqueteFuentes):
+        paquete = PaqueteFuentes(Path(paquete))
+
+    # read_only: COMPRAS_PEDIDOS_PROV trae 151 mil filas y CEDIS_INVENTARIO
+    # declara un millón; cargarlas en el modo normal de openpyxl multiplica
+    # por varias veces la memoria del proceso.
+    wb = openpyxl.load_workbook(paquete.xlsx, data_only=True, read_only=True)
     fu = Fuentes()
     adv = fu.advertencias
+
+    for suelto in paquete.sueltos:
+        adv.append(f"{suelto.name}: no corresponde a ninguna hoja del layout. "
+                   f"No se leyó — revisar el nombre del archivo.")
+
+    llaves = (llaves_con_faltante_ws(wb["BOPS_OSA"], umbral_osa)
+              if "BOPS_OSA" in wb.sheetnames else set())
 
     def registrar(hoja: str, filas: List[dict], campos_fecha: List[str],
                   nota_si_vacia: Optional[str] = None):
@@ -173,18 +257,50 @@ def leer_fuentes(ruta: Path) -> Fuentes:
         fu.catalogo[(_texto(f["sku"]), _texto(f["tienda"]))] = f
     registrar("CATALOGO", filas, [])
 
-    for hoja, destino, llave3 in [
-        ("TABLEAU_INV_TIENDA", fu.inv_tienda, "tienda"),
-        ("BOPS_OSA", fu.osa, "tienda"),
-        ("TABLEAU_VENTAS", fu.ventas, "tienda"),
-        ("CEDIS_INVENTARIO", fu.inv_cedis, "cedis"),
+    for hoja, destino, llave3, filtrable in [
+        ("TABLEAU_INV_TIENDA", fu.inv_tienda, "tienda", True),
+        ("BOPS_OSA", fu.osa, "tienda", False),
+        ("TABLEAU_VENTAS", fu.ventas, "tienda", True),
+        ("CEDIS_INVENTARIO", fu.inv_cedis, "cedis", False),
     ]:
+        rutas = paquete.csvs.get(hoja)
+        if rutas and hoja in wb.sheetnames:
+            adv.append(f"{hoja}: llegó como CSV y también como hoja del Excel. "
+                       f"Se usa la hoja del Excel y se ignora el CSV.")
+            rutas = None
+
+        if rutas:
+            # Sólo los días que el análisis va a mirar. El resto se descarta
+            # sin construirle el dict: son millones de filas.
+            rep = ReporteCSV(hoja)
+            n = 0
+            for f in leer_csv(rutas, hoja, llaves=llaves if filtrable else None, rep=rep):
+                destino[(f.get("sku"), f.get(llave3), f.get("fecha"))] = f
+                n += 1
+            fu.conteo[hoja] = rep.filas_leidas
+            fu.rango[hoja] = (rep.desde, rep.hasta)
+            for a in rep.advertencias:
+                adv.append(a)
+            if not rep.filas_leidas:
+                adv.append(f"{hoja}: los CSV llegaron VACÍOS.")
+            elif not n:
+                adv.append(f"{hoja}: se leyeron {rep.filas_leidas:,} filas y ninguna "
+                           f"corresponde a un día con faltante. Revisar que sean la "
+                           f"misma tienda y el mismo periodo que BOPS_OSA.")
+            continue
+
         filas = leer_hoja(wb, hoja, adv)
         for f in filas:
             d = _fecha(f["fecha"])
             if d:
                 destino[(_texto(f["sku"]), _texto(f[llave3]), d)] = f
         registrar(hoja, filas, ["fecha"])
+
+    # Qué días cubre la extracción de CEDIS, por CEDIS. Se arma de lo leído y
+    # no del rango declarado: es lo que decide dónde la ausencia de fila vale
+    # como cero.
+    for _, cedis, d in fu.inv_cedis:
+        fu.dias_cedis.setdefault(cedis, set()).add(d)
 
     fu.transferencias = leer_hoja(wb, "CEDIS_TRANSFERENCIAS", adv)
     registrar("CEDIS_TRANSFERENCIAS", fu.transferencias,
@@ -209,6 +325,7 @@ def leer_fuentes(ruta: Path) -> Fuentes:
         fu.citas_por_pedido.setdefault(
             (_texto(c.get("folio")), _texto(c.get("sku"))), []).append(c)
 
+    _indexar_eventos(fu)
     _revisar_cobertura_de_citas(fu)
 
     aviso = aviso_prioridad_3(fu)
@@ -216,6 +333,50 @@ def leer_fuentes(ruta: Path) -> Fuentes:
         fu.advertencias.insert(0, aviso)
 
     return fu
+
+
+def _indexar_eventos(fu: Fuentes) -> None:
+    """Agrupa los eventos por la clave con la que se consultan, con las fechas
+    ya convertidas.
+
+    Las tres derivaciones del día D (tránsito, envío, orden a proveedor)
+    recorrían la lista COMPLETA de eventos una vez por cada día con faltante.
+    Con el volumen real eso son 30,565 días × (30 mil transferencias × 2 +
+    151 mil pedidos) ≈ 6.4 mil millones de vueltas, reparseando además la
+    misma fecha millones de veces: horas de corrida. Con volúmenes de
+    ejemplo nunca se notó.
+
+    Aquí se paga una sola pasada por evento y cada día toca únicamente los
+    suyos. El filtro que aplica cada regla no cambia — sólo deja de recorrer
+    lo que de todas formas iba a descartar.
+
+    Las listas originales (fu.transferencias, fu.pedidos_prov, ...) quedan
+    intactas: el scorecard de proveedores y los reportes de citas siguen
+    leyéndolas tal cual.
+    """
+    for t in fu.transferencias:
+        clave = (_texto(t.get("sku")), _texto(t.get("tienda_destino")))
+        fu.transferencias_por.setdefault(clave, []).append((
+            _fecha(t.get("fecha_generacion")),
+            _fecha(t.get("fecha_salida_cedis")),
+            _fecha(t.get("fecha_recepcion_tienda")),
+        ))
+
+    for p in fu.pedidos_tienda:
+        clave = (_texto(p.get("sku")), _texto(p.get("tienda")))
+        fu.pedidos_tienda_por.setdefault(clave, []).append((
+            _fecha(p.get("fecha_pedido")),
+            _fecha(p.get("fecha_surtido")),
+        ))
+
+    for o in fu.pedidos_prov:
+        clave = (_texto(o.get("sku")), _texto(o.get("cedis_destino")))
+        fu.pedidos_prov_por.setdefault(clave, []).append((
+            _fecha(o.get("fecha_pedido")),
+            _fecha(o.get("fecha_recibo")),
+            _compromiso(o),
+            o,
+        ))
 
 
 def aviso_prioridad_3(fu: Fuentes) -> Optional[str]:
@@ -286,11 +447,7 @@ def derivar_transito_vigente(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     """Existe transferencia que ya salió de CEDIS y aún no se recibe en tienda."""
     if fu.vacia("CEDIS_TRANSFERENCIAS"):
         return None
-    for t in fu.transferencias:
-        if _texto(t["sku"]) != sku or _texto(t["tienda_destino"]) != tienda:
-            continue
-        salida = _fecha(t.get("fecha_salida_cedis"))
-        recepcion = _fecha(t.get("fecha_recepcion_tienda"))
+    for _, salida, recepcion in fu.transferencias_por.get((sku, tienda), ()):
         if salida and salida <= D and (recepcion is None or D < recepcion):
             return True
     return False
@@ -300,11 +457,7 @@ def derivar_envio_generado(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     """Existe transferencia generada y todavía no recibida en tienda."""
     if fu.vacia("CEDIS_TRANSFERENCIAS"):
         return None
-    for t in fu.transferencias:
-        if _texto(t["sku"]) != sku or _texto(t["tienda_destino"]) != tienda:
-            continue
-        generacion = _fecha(t.get("fecha_generacion"))
-        recepcion = _fecha(t.get("fecha_recepcion_tienda"))
+    for generacion, _, recepcion in fu.transferencias_por.get((sku, tienda), ()):
         if generacion and generacion <= D and (recepcion is None or recepcion > D):
             return True
     return False
@@ -314,11 +467,7 @@ def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     """Existe pedido de tienda abierto al día D."""
     if fu.vacia("SIMA_PEDIDOS_TIENDA"):
         return None
-    for p in fu.pedidos_tienda:
-        if _texto(p["sku"]) != sku or _texto(p["tienda"]) != tienda:
-            continue
-        pedido = _fecha(p.get("fecha_pedido"))
-        surtido = _fecha(p.get("fecha_surtido"))
+    for pedido, surtido in fu.pedidos_tienda_por.get((sku, tienda), ()):
         if pedido and pedido <= D and (surtido is None or surtido > D):
             return True
     return False
@@ -357,19 +506,14 @@ def derivar_orden_proveedor(fu: Fuentes, sku, cedis, D) -> OrdenProveedor:
     if fu.vacia("COMPRAS_PEDIDOS_PROV"):
         return OrdenProveedor()
 
-    vigentes = []
-    for o in fu.pedidos_prov:
-        if _texto(o["sku"]) != sku or _texto(o.get("cedis_destino")) != cedis:
-            continue
-        pedido = _fecha(o.get("fecha_pedido"))
-        recibo = _fecha(o.get("fecha_recibo"))
-        if pedido and pedido <= D and (recibo is None or recibo > D):
-            vigentes.append(o)
+    vigentes = [(compromiso, o) for pedido, recibo, compromiso, o
+                in fu.pedidos_prov_por.get((sku, cedis), ())
+                if pedido and pedido <= D and (recibo is None or recibo > D)]
 
     if not vigentes:
         return OrdenProveedor(existe=False)
 
-    o = min(vigentes, key=lambda x: (_compromiso(x), _texto(x.get("folio")) or ""))
+    _, o = min(vigentes, key=lambda x: (x[0], _texto(x[1].get("folio")) or ""))
     folio = _texto(o.get("folio"))
     orden = OrdenProveedor(
         existe=True,
@@ -421,6 +565,8 @@ def _aplicar_citas(fu: Fuentes, orden: OrdenProveedor, folio, sku, D) -> OrdenPr
 def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTienda]:
     """Una evidencia por cada día con faltante (OSA por debajo del umbral)."""
     evidencias = []
+    sin_catalogo = set()      # (sku, tienda) — se reportan juntos al final
+    cedis_derivado = 0        # días con existencia de CEDIS leída como cero
 
     for (sku, tienda, D), fila_osa in sorted(fu.osa.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
         osa = _osa_pct(fila_osa.get("osa_pct"))
@@ -429,7 +575,7 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
 
         cat = fu.catalogo.get((sku, tienda))
         if cat is None:
-            fu.advertencias.append(f"CATALOGO: falta el SKU {sku} en la tienda {tienda}.")
+            sin_catalogo.add((sku, tienda))
             via, cedis, tipo_resurtido = None, None, None
         else:
             via = VIAS.get(str(_texto(cat.get("via_resurtido")) or "").lower())
@@ -449,14 +595,30 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             existencia_cedis = _entero(inv_c.get("existencia_piezas"))
             reservadas = _entero(inv_c.get("piezas_reservadas")) or 0
             existencia_cedis = max(0, existencia_cedis - reservadas)
+        elif CEDIS_AUSENCIA_ES_CERO and fu.cedis_cubre(cedis, D):
+            # El reporte omite los SKU en cero, así que en un día extraído la
+            # ausencia es un cero confirmado. Ver CEDIS_AUSENCIA_ES_CERO.
+            existencia_cedis = 0
+            cedis_derivado += 1
 
-        venta = fu.ventas.get((sku, tienda, D))
+        # La venta perdida manda desde BOPS_OSA: es quien mide cuánto tiempo
+        # estuvo vacío el anaquel, y viene para todos los días con faltante.
+        # TABLEAU_VENTAS queda de respaldo para los layouts viejos, donde ese
+        # campo todavía vivía ahí.
+        venta_perdida = _decimal(fila_osa.get("venta_perdida_estimada"))
+        if venta_perdida is None:
+            venta = fu.ventas.get((sku, tienda, D))
+            venta_perdida = _decimal(venta.get("venta_perdida_estimada")) if venta else None
+
         orden = derivar_orden_proveedor(fu, sku, cedis, D) if cedis else OrdenProveedor()
 
         evidencias.append(EvidenciaSKUTienda(
             sku=sku, tienda=tienda, fecha=D,
             osa=osa,
-            venta_perdida=_decimal(venta.get("venta_perdida_estimada")) if venta else None,
+            venta_perdida=venta_perdida,
+            # None si no hay catálogo con qué comprobarlo: sin la hoja no se
+            # puede afirmar que un SKU esté fuera del alcance.
+            en_catalogo=None if fu.vacia("CATALOGO") else cat is not None,
             inventario_tienda=existencia,
             transito_vigente=derivar_transito_vigente(fu, sku, tienda, D),
             pedido_tienda_generado=derivar_pedido_tienda(fu, sku, tienda, D),
@@ -474,6 +636,27 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             proveedor_folio_pedido=orden.folio,
             proveedor_folio_cita=orden.folio_cita,
         ))
+
+    # Una advertencia por motivo, no por día: con un catálogo parcial esto
+    # serían decenas de miles de líneas repetidas en el Excel y en el JSON.
+    if sin_catalogo:
+        skus = sorted({s for s, _ in sin_catalogo})
+        n = len(sin_catalogo)
+        fu.advertencias.append(
+            f"BOPS_OSA trae {n} {'combinación' if n == 1 else 'combinaciones'} "
+            f"SKU-tienda con faltante que no existen en CATALOGO ({len(skus)} "
+            f"{'SKU distinto' if len(skus) == 1 else 'SKU distintos'}, ej: "
+            f"{', '.join(skus[:5])}). Se cuentan como FUERA DEL ALCANCE, no como "
+            f"dato faltante: el catálogo define qué SKU le tocan a este análisis. "
+            f"Si la extracción de OSA debería venir filtrada a la misma división "
+            f"que el catálogo, hay que pedirla así.")
+
+    if cedis_derivado:
+        fu.advertencias.append(
+            f"CEDIS_INVENTARIO: {cedis_derivado} días se resolvieron con existencia "
+            f"CERO derivada de la ausencia de fila, porque el reporte omite los SKU "
+            f"sin existencia (confirmado con La Comer). Es el único lugar del modelo "
+            f"donde vacío se lee como cero; se apaga con CEDIS_AUSENCIA_ES_CERO.")
 
     return evidencias
 
@@ -772,13 +955,15 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
         f += 2
         _encabezado(ws, f, ["", "Pedido", "SKU", "Qué no cuadra"] + [""] * 10)
         f += 1
+        # Sin merge_cells por fila: openpyxl compara cada rango fusionado
+        # contra todos los anteriores, y con decenas de miles de filas eso
+        # deja de terminar. El texto se desborda sobre las columnas vacías de
+        # la derecha, que se lee igual y escribe en un instante.
+        ambar = PatternFill("solid", fgColor=AMBAR)
         for d in disc:
             ws.cell(row=f, column=2, value=d["folio"]).border = BORDE
             ws.cell(row=f, column=3, value=d["sku"]).border = BORDE
-            c = ws.cell(row=f, column=4, value=d["motivos"])
-            c.alignment = WRAP
-            c.fill = PatternFill("solid", fgColor=AMBAR)
-            ws.merge_cells(start_row=f, start_column=4, end_row=f, end_column=14)
+            ws.cell(row=f, column=4, value=d["motivos"]).fill = ambar
             f += 1
 
 
@@ -786,6 +971,11 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
                        diagnosticos: List[dict]):
     wb = openpyxl.Workbook()
     aviso = aviso_prioridad_3(fu)
+
+    # El Pareto y el detalle por SKU se calculan sobre el alcance; la
+    # clasificación diaria y la cobertura, sobre todo lo que entregó BOPS.
+    # Ver dentro_del_alcance().
+    en_alcance = dentro_del_alcance(diagnosticos)
 
     # --- Clasificación diaria --------------------------------------------
     ws = wb.active
@@ -848,7 +1038,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     for col, w in zip("ABCDEF", [4, 40, 12, 18, 14, 26]):
         ws.column_dimensions[col].width = w
 
-    diags = diagnosticar_periodo(diagnosticos)
+    diags = diagnosticar_periodo(en_alcance)
     par = pareto_periodo(diags)
 
     ws["B2"] = "Pareto del periodo"
@@ -864,7 +1054,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         f += 2
     _encabezado(ws, f, ["", "Causa raíz", "Días", "Venta perdida", "% del total", "Responsable"])
     f += 1
-    for fila in resumen_por_causa(diagnosticos):
+    for fila in resumen_por_causa(en_alcance):
         ws.cell(row=f, column=2, value=f"{fila['root_cause_id']} · {fila['causa']}")
         ws.cell(row=f, column=2).fill = PatternFill(
             "solid", fgColor=COLOR_CAUSA.get(fila["root_cause_id"], GRIS))
@@ -879,7 +1069,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     f += 2
     _encabezado(ws, f, ["", "Responsable", "Días", "Venta perdida", "% del total", ""])
     f += 1
-    for fila in resumen_por_responsable(diagnosticos):
+    for fila in resumen_por_responsable(en_alcance):
         ws.cell(row=f, column=2, value=fila["responsable"]).font = NEGRITA
         ws.cell(row=f, column=3, value=fila["dias"])
         ws.cell(row=f, column=4, value=fila["venta_perdida"])
@@ -932,7 +1122,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     ws.auto_filter.ref = f"A4:K{4 + len(diags)}"
 
     # --- Proveedor y citas ------------------------------------------------
-    escribir_hoja_proveedor(wb, fu, diagnosticos)
+    escribir_hoja_proveedor(wb, fu, en_alcance)
 
     # --- Cobertura y fuentes ---------------------------------------------
     ws = wb.create_sheet("Cobertura y fuentes")
@@ -950,13 +1140,38 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         _banner(ws, f, 2, 6, aviso, alto=60)
         f += 2
     osa_gral = cob["osa_general"]
-    for k, v in [("OSA general del periodo", f"{osa_gral}%" if osa_gral is not None else "n/d"),
-                 ("Días con faltante analizados", cob["casos_totales"]),
-                 ("Días clasificados", cob["casos_clasificados"]),
-                 ("Cobertura sobre días", f"{cob['cobertura_casos_pct']}%"),
-                 ("Venta perdida total", f"${cob['venta_perdida_total']:,.2f}"),
-                 ("Venta perdida clasificada", f"${cob['venta_perdida_clasificada']:,.2f}"),
-                 ("Cobertura sobre impacto", f"{cob['cobertura_venta_perdida_pct']}%")]:
+    filas_resumen = [
+        ("OSA general del periodo", f"{osa_gral}%" if osa_gral is not None else "n/d"),
+        ("Días con faltante que entregó BOPS", cob["casos_totales"]),
+    ]
+    # Las dos coberturas sólo se separan cuando de verdad hay días fuera del
+    # catálogo; si no, mostrar ambas sería ruido.
+    if cob["casos_fuera_de_alcance"]:
+        filas_resumen += [
+            ("  de esos, fuera del catálogo de la tienda",
+             f"{cob['casos_fuera_de_alcance']} "
+             f"(${cob['venta_perdida_fuera_de_alcance']:,.2f})"),
+            ("Días con faltante DENTRO del alcance", cob["casos_en_alcance"]),
+            ("Días clasificados", cob["casos_clasificados"]),
+            ("Cobertura sobre el alcance",
+             f"{cob['cobertura_casos_alcance_pct']}%"),
+            ("Cobertura sobre todo lo que entregó BOPS",
+             f"{cob['cobertura_casos_pct']}%"),
+            ("Venta perdida dentro del alcance",
+             f"${cob['venta_perdida_en_alcance']:,.2f}"),
+            ("Venta perdida clasificada", f"${cob['venta_perdida_clasificada']:,.2f}"),
+            ("Cobertura sobre impacto (alcance)",
+             f"{cob['cobertura_venta_perdida_alcance_pct']}%"),
+        ]
+    else:
+        filas_resumen += [
+            ("Días clasificados", cob["casos_clasificados"]),
+            ("Cobertura sobre días", f"{cob['cobertura_casos_pct']}%"),
+            ("Venta perdida total", f"${cob['venta_perdida_total']:,.2f}"),
+            ("Venta perdida clasificada", f"${cob['venta_perdida_clasificada']:,.2f}"),
+            ("Cobertura sobre impacto", f"{cob['cobertura_venta_perdida_pct']}%"),
+        ]
+    for k, v in filas_resumen:
         ws.cell(row=f, column=2, value=k).font = NEGRITA
         ws.cell(row=f, column=2).fill = PatternFill("solid", fgColor=GRIS)
         ws.cell(row=f, column=4, value=v)
@@ -987,6 +1202,9 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
                 "Decisión de negocio — la matriz no cubre el faltante previo a la cita",
             "regla_matriz_para_entrega_completa_con_cedis_en_cero":
                 "Decisión de negocio — la matriz no cubre CEDIS en cero con entrega completa",
+            FUERA_DE_CATALOGO:
+                "BOPS — SKU que el catálogo de la tienda no reconoce. No es un dato "
+                "faltante: son días fuera del alcance del análisis",
         }
         for campo, n in cob["campos_que_bloquean"].items():
             ws.cell(row=f, column=2, value=campo).font = Font(name="Consolas", size=10)
@@ -1041,6 +1259,9 @@ def main() -> int:
         description="Lee el Excel de captura y clasifica el desabasto por causa raíz.")
     ap.add_argument("archivo",
                     help="Excel de captura llenado por los equipos.")
+    ap.add_argument("csv", nargs="*", type=Path,
+                    help="CSV de las hojas que ya no caben en el Excel "
+                         "(TABLEAU_INV_TIENDA_*.csv, TABLEAU_VENTAS.csv).")
     ap.add_argument("-o", "--salida", default=None,
                     help="Excel de resultados. Por omisión, 'Resultado RCA - <archivo>'.")
     ap.add_argument("--umbral-osa", type=float, default=100.0,
@@ -1052,11 +1273,20 @@ def main() -> int:
         print(f"No se encontró el archivo: {entrada}", file=sys.stderr)
         return 1
 
+    faltan = [c for c in args.csv if not c.exists()]
+    if faltan:
+        print(f"No se encontraron: {', '.join(str(c) for c in faltan)}", file=sys.stderr)
+        return 1
+
     salida = Path(args.salida) if args.salida else \
         entrada.with_name(f"Resultado RCA - {entrada.stem}.xlsx")
 
+    paquete = PaqueteFuentes.desde(entrada, args.csv)
     print(f"\nLeyendo  {entrada.name}")
-    fu = leer_fuentes(entrada)
+    for hoja, rutas in paquete.csvs.items():
+        print(f"         {hoja} <- {len(rutas)} CSV "
+              f"({sum(r.stat().st_size for r in rutas) / 1e6:.0f} MB)")
+    fu = leer_fuentes(paquete, args.umbral_osa)
     for hoja in HOJAS:
         n = fu.conteo.get(hoja, 0)
         d0, d1 = fu.rango.get(hoja, (None, None))
@@ -1084,11 +1314,22 @@ def main() -> int:
     if cob["osa_general"] is not None:
         print(f"\nOSA general del periodo: {cob['osa_general']}%")
 
-    print(f"\nAnalizados {cob['casos_totales']} días con faltante · "
-          f"clasificados {cob['casos_clasificados']} ({cob['cobertura_casos_pct']}%)")
-    print(f"Venta perdida ${cob['venta_perdida_total']:,.2f} · "
-          f"clasificada ${cob['venta_perdida_clasificada']:,.2f} "
-          f"({cob['cobertura_venta_perdida_pct']}%)")
+    print(f"\nBOPS entregó {cob['casos_totales']:,} días con faltante")
+    if cob["casos_fuera_de_alcance"]:
+        print(f"  {cob['casos_fuera_de_alcance']:,} fuera del catálogo de la tienda "
+              f"(${cob['venta_perdida_fuera_de_alcance']:,.2f}) — no entran al análisis")
+        print(f"  {cob['casos_en_alcance']:,} dentro del alcance · "
+              f"clasificados {cob['casos_clasificados']:,} "
+              f"({cob['cobertura_casos_alcance_pct']}%)")
+        print(f"Venta perdida en alcance ${cob['venta_perdida_en_alcance']:,.2f} · "
+              f"clasificada ${cob['venta_perdida_clasificada']:,.2f} "
+              f"({cob['cobertura_venta_perdida_alcance_pct']}%)")
+    else:
+        print(f"  clasificados {cob['casos_clasificados']:,} "
+              f"({cob['cobertura_casos_pct']}%)")
+        print(f"Venta perdida ${cob['venta_perdida_total']:,.2f} · "
+              f"clasificada ${cob['venta_perdida_clasificada']:,.2f} "
+              f"({cob['cobertura_venta_perdida_pct']}%)")
 
     print("\nPareto por causa raíz")
     for causa, pct in par["pareto_por_causa"].items():
@@ -1118,7 +1359,7 @@ def main() -> int:
                   f"{d.citas_incumplidas} citas falladas)")
 
     print("\nTop SKU-Tienda por impacto")
-    diags_st = diagnosticar_periodo(diagnosticos)
+    diags_st = diagnosticar_periodo(dentro_del_alcance(diagnosticos))
     for dd in diags_st[:10]:
         print(f"  ${dd.venta_perdida_total:>12,.2f}   SKU {dd.sku} / tienda {dd.tienda}   "
               f"[{dd.root_cause_id_dominante}] {dd.causa_dominante}")

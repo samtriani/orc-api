@@ -28,6 +28,12 @@ FILA_DATOS = 6
 
 TXT, ENT, DEC, FEC, LST, BOL, HOR = "Texto", "Entero", "Decimal", "Fecha", "Lista", "Sí/No", "Hora"
 
+# De dónde llega cada hoja. Desde el layout V5, dos de ellas pasan del millón
+# de filas que aguanta una hoja de Excel y se entregan como CSV aparte. El
+# validador usa esto para saber qué exigir dentro del .xlsx y qué exigir como
+# archivo suelto; sin el marcador, un layout V5 correcto se reporta como roto.
+EXCEL, CSV, AMBOS = "excel", "csv", "ambos"
+
 # Formas de los datos
 ESTATICO = "Estático — una fila por SKU y tienda"
 DIARIO = "Foto diaria — una fila por SKU, tienda y día"
@@ -59,6 +65,8 @@ HOJAS = {
             ("rol_frecuencia", TXT, False, "Rol por frecuencia (base F9).", "A"),
             ("linea_vs_io", LST, False, "Línea / In&Out. No se usa para clasificar; sirve para segmentar el Pareto.", "Línea"),
             ("estatus_activo", BOL, True, "SKU vigente en catálogo para esa tienda.", "Sí"),
+            ("Nombre_Tienda", TXT, False, "Nombre comercial de la tienda. Sólo para leer el "
+                                          "reporte; ninguna regla lo usa.", "LA COMER COYOACAN"),
         ],
     },
 
@@ -66,6 +74,7 @@ HOJAS = {
     "TABLEAU_INV_TIENDA": {
         "titulo": "Inventario en tienda — diario",
         "forma": DIARIO,
+        "origen": CSV,
         "equipo": "Tableau",
         "owner": "Andrés",
         "ventana": "2026-03-01 a 2026-03-31. Una fila por SKU, tienda y día, incluyendo los días en cero.",
@@ -75,7 +84,10 @@ HOJAS = {
             ("tienda", TXT, True, "", "287"),
             ("fecha", FEC, True, "AAAA-MM-DD.", "2026-03-09"),
             ("existencia_piezas", ENT, True, "Existencia del día en piezas. CERO es un dato válido y necesario.", "0"),
-            ("hora_de_corte", HOR, True, "Hora a la que se toma la foto de inventario.", "23:59"),
+            ("hora_de_corte", HOR, False,
+             "Hora a la que se toma la foto de inventario. Ninguna regla la lee: "
+             "se asume el cierre del día (23:59), que es como sale el reporte. "
+             "Documenta el supuesto, no cambia ningún resultado.", "23:59"),
             ("existencia_minima_dia", ENT, False, "Mínimo alcanzado durante el día. Si existe, el motor lo prefiere sobre la foto.", "0"),
         ],
     },
@@ -87,12 +99,16 @@ HOJAS = {
         "equipo": "BOPS",
         "owner": "Por asignar",
         "ventana": "2026-03-01 a 2026-03-31.",
-        "para_que": "Define qué días entran al análisis: sólo se clasifican los días con OSA menor a 100%.",
+        "para_que": "Define qué días entran al análisis: sólo se clasifican los días con OSA menor a 100%. "
+                    "Desde el layout V5 trae también la venta perdida, que es lo que pondera el Pareto.",
         "campos": [
             ("sku", TXT, True, "", "7501059236776"),
             ("tienda", TXT, True, "", "287"),
             ("fecha", FEC, True, "AAAA-MM-DD.", "2026-03-09"),
             ("osa_pct", DEC, True, "Disponibilidad en anaquel del día, de 0 a 100.", "12.0"),
+            ("venta_perdida_estimada", DEC, True,
+             "Venta perdida del día en pesos. Vive aquí y no en TABLEAU_VENTAS porque "
+             "es BOPS quien sabe cuántas horas estuvo vacío el anaquel.", "1408.00"),
             ("numero_rupturas", ENT, False, "Cuántas veces se agotó el anaquel ese día.", "2"),
             ("minutos_sin_producto", ENT, False, "Duración total del hueco en minutos.", "845"),
         ],
@@ -102,17 +118,22 @@ HOJAS = {
     "TABLEAU_VENTAS": {
         "titulo": "Ventas y venta perdida — diario",
         "forma": DIARIO,
+        "origen": CSV,
         "equipo": "Tableau",
         "owner": "Andrés",
         "ventana": "2026-03-01 a 2026-03-31.",
-        "para_que": "Pondera el Pareto por impacto en pesos. Sin esto el resultado sólo cuenta días.",
+        "para_que": "Contexto de venta real del día. Desde el layout V5 ya NO es la fuente de la venta "
+                    "perdida: ésa vive en BOPS_OSA. El motor no depende de esta hoja para clasificar "
+                    "ni para ponderar el Pareto.",
         "campos": [
             ("sku", TXT, True, "", "7501059236776"),
             ("tienda", TXT, True, "", "287"),
             ("fecha", FEC, True, "AAAA-MM-DD.", "2026-03-09"),
-            ("unidades_vendidas", ENT, True, "", "0"),
             ("importe_venta", DEC, True, "Venta real del día en pesos.", "0.00"),
-            ("venta_perdida_estimada", DEC, True, "Si La Comer no la calcula hoy, indicarlo y se estima con el promedio de días con disponibilidad.", "1408.00"),
+            ("unidades_vendidas", ENT, False, "", "0"),
+            ("venta_perdida_estimada", DEC, False,
+             "Se dejó opcional al mudarse a BOPS_OSA. Si viene, el motor la usa sólo "
+             "cuando BOPS_OSA no trae el dato de ese día.", "1408.00"),
             ("metodo_estimacion", TXT, False, "Cómo se calculó la venta perdida.", "Promedio 4 semanas"),
         ],
     },
@@ -124,7 +145,11 @@ HOJAS = {
         "equipo": "CEDIS",
         "owner": "Andrés",
         "ventana": "2026-03-01 a 2026-03-31.",
-        "para_que": "Separa 'CEDIS no tenía' de 'CEDIS tenía y no lo mandó' (prioridades 5 a 8).",
+        "para_que": "Separa 'CEDIS no tenía' de 'CEDIS tenía y no lo mandó' (prioridades 5 a 8). "
+                    "ÚNICA hoja donde la ausencia de fila SÍ significa cero: el reporte de CEDIS "
+                    "lista los SKU con existencia y omite los que están en cero (confirmado con "
+                    "La Comer, 2026-08-06). Aplica sólo a los días que la extracción cubre; un día "
+                    "que no se extrajo sigue siendo un dato ausente.",
         "campos": [
             ("sku", TXT, True, "", "7501059236776"),
             ("cedis", TXT, True, "Debe coincidir con cedis_surtidor de la hoja CATALOGO.", "280"),
@@ -251,6 +276,11 @@ ALIAS_ENCABEZADOS = {
         "estatus cita": "estatus_cita",
     },
 }
+
+
+def origen_de(hoja: str) -> str:
+    """De dónde se espera esa hoja. Por omisión, del Excel."""
+    return HOJAS.get(hoja, {}).get("origen", EXCEL)
 
 
 def normalizar_encabezado(hoja: str, texto):
