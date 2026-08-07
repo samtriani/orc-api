@@ -69,6 +69,19 @@ class SubcausaProveedor(str, Enum):
     ENTREGA_PARCIAL = "Entregó menos de lo que confirmó en la cita"
 
 
+# Un día cuyo SKU no está en el catálogo de la tienda no es un día que el
+# modelo no supo explicar: es un día que no le tocaba explicar. En el layout
+# V5, BOPS_OSA entrega SKU de divisiones fuera del alcance (perfumería,
+# electrónica) mientras que catálogo, inventario y pedidos vienen filtrados a
+# Abarrotes. Sin separarlos, esos días entran al denominador de la cobertura
+# como si fueran fuentes faltantes y hunden el resultado.
+#
+# Se marcan con este campo faltante para que la cobertura pueda reportar dos
+# cifras: sobre el alcance y sobre todo lo que llegó. No se descartan — que
+# BOPS mande SKU de más es justamente lo que hay que corregir en el origen.
+FUERA_DE_CATALOGO = "sku_fuera_del_catalogo_de_la_tienda"
+
+
 class TipoResurtido(str, Enum):
     """Fuente: CATALOGO.tipo_resurtido. Refina el responsable de la prioridad 3
     (RC03 'Pedido No Generado') cuando SIMA confirma que no hubo pedido de
@@ -201,6 +214,10 @@ class EvidenciaSKUTienda:
     osa: Optional[float] = None
     venta_perdida: Optional[float] = None
 
+    # --- Prioridad 0: ¿el SKU pertenece al catálogo de la tienda?  Fuente: CATALOGO
+    # None = no se pudo comprobar (catálogo vacío); False = está fuera del alcance.
+    en_catalogo: Optional[bool] = None
+
     # --- Prioridad 1: ¿había producto en tienda?      Fuente: Inventario tienda / BOPS
     inventario_tienda: Optional[int] = None
 
@@ -276,6 +293,25 @@ class Regla:
     def evalua(self, ev: EvidenciaSKUTienda, ctx: List[str]) -> Evaluacion:
         """ctx acumula la evidencia confirmada por las reglas anteriores."""
         raise NotImplementedError
+
+
+class R0_DentroDelCatalogo(Regla):
+    """Prioridad 0 — el SKU tiene que estar en el catálogo de esa tienda.
+
+    No es una regla de la matriz: es el filtro de alcance. Un SKU que el
+    catálogo de la tienda no reconoce no se puede clasificar con este árbol
+    —no hay vía de resurtido ni CEDIS surtidor que consultar— y sobre todo no
+    debería contarse contra la cobertura del modelo. Ver FUERA_DE_CATALOGO.
+    """
+    prioridad = 0
+
+    def evalua(self, ev, ctx):
+        if ev.en_catalogo is False:
+            return Indeterminado(
+                self.prioridad, [FUERA_DE_CATALOGO],
+                ["El SKU no está en el catálogo de la tienda: queda fuera del "
+                 "alcance del análisis, no es un dato faltante"])
+        return None
 
 
 class R1_InventarioEnTienda(Regla):
@@ -592,6 +628,7 @@ class MotorRCA:
 
     def __init__(self):
         self.reglas: List[Regla] = [
+            R0_DentroDelCatalogo(),
             R1_InventarioEnTienda(),
             R2_TransitoVigente(),
             R3_PedidoTiendaNoGenerado(),

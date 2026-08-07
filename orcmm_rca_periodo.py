@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from orcmm_rca_engine import EvidenciaSKUTienda, MotorRCA, ViaResurtido
+from orcmm_rca_engine import (FUERA_DE_CATALOGO, EvidenciaSKUTienda, MotorRCA,
+                              ViaResurtido)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,22 @@ class DiagnosticoPeriodoSKUTienda:
         if not self.dias_con_faltante:
             return 0.0
         return round(self.dias_clasificados / self.dias_con_faltante * 100, 1)
+
+
+def dentro_del_alcance(diagnosticos: List[dict]) -> List[dict]:
+    """Quita los días cuyo SKU no está en el catálogo de la tienda.
+
+    Se usa para el Pareto y el detalle por SKU, que responden "¿de qué se
+    está muriendo el negocio?". Meter ahí SKU de divisiones que el análisis
+    no cubre inventa un 'Sin clasificar' gigante que no es una causa raíz,
+    es una extracción mal filtrada — y esconde el Pareto real debajo.
+
+    La cobertura sí los sigue contando y los reporta aparte: se separan, no
+    se descartan. La hoja de clasificación diaria también los conserva, con
+    su motivo. Ver FUERA_DE_CATALOGO.
+    """
+    return [dg for dg in diagnosticos
+            if FUERA_DE_CATALOGO not in dg["datos_faltantes"]]
 
 
 def diagnosticar_periodo(diagnosticos: List[dict]) -> List[DiagnosticoPeriodoSKUTienda]:
@@ -135,11 +152,24 @@ def cobertura_modelo(diagnosticos: List[dict]) -> dict:
 
     Es el insumo para priorizar la integración de fuentes: el campo que más
     se repite es el que más caro está saliendo.
+
+    Se reportan DOS coberturas, porque hay dos preguntas distintas:
+
+      sobre el alcance  — de los días que al modelo le tocaba explicar,
+                          ¿cuántos explicó? Es la que mide al modelo.
+      global            — sobre todo lo que entregó BOPS, incluidos los SKU
+                          que no están en el catálogo de la tienda. Es la que
+                          mide la calidad de la extracción.
+
+    Sin separarlas, un export de OSA que trae divisiones fuera del alcance
+    hunde la cifra y parece una falla del modelo. Ver FUERA_DE_CATALOGO.
     """
     total_casos = 0
     casos_clasificados = 0
+    fuera_casos = 0
     vp_total = 0.0
     vp_clasificada = 0.0
+    vp_fuera = 0.0
     bloqueos: Counter = Counter()
     vp_bloqueada: Dict[str, float] = defaultdict(float)
 
@@ -151,13 +181,21 @@ def cobertura_modelo(diagnosticos: List[dict]) -> dict:
         if dg["clasificado"]:
             casos_clasificados += 1
             vp_clasificada += vp
-        else:
-            for campo in dg["datos_faltantes"]:
-                bloqueos[campo] += 1
-                vp_bloqueada[campo] += vp
+            continue
+
+        if FUERA_DE_CATALOGO in dg["datos_faltantes"]:
+            fuera_casos += 1
+            vp_fuera += vp
+
+        for campo in dg["datos_faltantes"]:
+            bloqueos[campo] += 1
+            vp_bloqueada[campo] += vp
 
     def pct(parte: float, todo: float) -> float:
         return round(parte / todo * 100, 1) if todo else 0.0
+
+    casos_alcance = total_casos - fuera_casos
+    vp_alcance = vp_total - vp_fuera
 
     return {
         "casos_totales": total_casos,
@@ -166,6 +204,13 @@ def cobertura_modelo(diagnosticos: List[dict]) -> dict:
         "venta_perdida_total": round(vp_total, 2),
         "venta_perdida_clasificada": round(vp_clasificada, 2),
         "cobertura_venta_perdida_pct": pct(vp_clasificada, vp_total),
+        # --- alcance: los días cuyo SKU sí está en el catálogo de la tienda
+        "casos_fuera_de_alcance": fuera_casos,
+        "venta_perdida_fuera_de_alcance": round(vp_fuera, 2),
+        "casos_en_alcance": casos_alcance,
+        "cobertura_casos_alcance_pct": pct(casos_clasificados, casos_alcance),
+        "venta_perdida_en_alcance": round(vp_alcance, 2),
+        "cobertura_venta_perdida_alcance_pct": pct(vp_clasificada, vp_alcance),
         "campos_que_bloquean": dict(bloqueos.most_common()),
         "venta_perdida_por_campo_faltante": {
             k: round(v, 2) for k, v in
