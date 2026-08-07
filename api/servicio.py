@@ -28,7 +28,8 @@ from orcmm_layout_spec import CSV, HOJAS, origen_de             # noqa: E402
 from orcmm_pipeline import (Fuentes, PaqueteFuentes, aviso_prioridad_3,  # noqa: E402
                             citas_incumplidas, derivar_evidencias,
                             desempeno_proveedores, discrepancias_pedido_cita,
-                            escribir_resultado, leer_fuentes, osa_general)
+                            escribir_resultado, fill_rate_proveedor, leer_fuentes,
+                            osa_alcance, osa_general, waterfall_osa)
 from orcmm_rca_engine import FUERA_DE_CATALOGO                  # noqa: E402
 from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
                                dentro_del_alcance, diagnosticar_periodo,
@@ -198,6 +199,7 @@ def analizar(ruta: Path, salida: Path, umbral_osa: float = 100.0, csvs=None) -> 
     if not evidencias:
         return {
             "hay_resultados": False,
+            "osa_alcance": osa_alcance(fu),
             "osa_general": osa_general(fu),
             "motivo": ("No hay días con faltante que analizar. Revisar BOPS_OSA: o viene "
                        "vacía, o todos los días traen OSA al 100%."),
@@ -229,7 +231,12 @@ def analizar(ruta: Path, salida: Path, umbral_osa: float = 100.0, csvs=None) -> 
 
     return {
         "hay_resultados": True,
+        # Dos OSA, igual que las dos coberturas: el del alcance es el número de
+        # portada, el general queda de contraste y mide la extracción.
+        "osa_alcance": osa_alcance(fu),
         "osa_general": osa_general(fu),
+        "waterfall": waterfall_osa(fu, diagnosticos),
+        "fill_rate_proveedor": fill_rate_proveedor(fu),
         "umbral_osa": umbral_osa,
         "aviso_parcial": aviso_prioridad_3(fu),
         "advertencias": fu.advertencias,

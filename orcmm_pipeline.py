@@ -125,6 +125,113 @@ def osa_general(fu: "Fuentes") -> Optional[float]:
     return round(sum(valores) / len(valores), 1) if valores else None
 
 
+def osa_alcance(fu: "Fuentes") -> Optional[float]:
+    """OSA% del periodo sobre los SKU que sí le tocan al análisis.
+
+    Es el número de portada. `osa_general` promedia TODO lo que entregó BOPS,
+    y cuando ese export trae divisiones fuera del alcance —como en el layout
+    V5— el promedio se hunde por SKU que el catálogo de la tienda ni conoce:
+    74.5% contra 85.9% sobre los mismos datos. Uno mide la disponibilidad, el
+    otro mide la extracción.
+
+    Sin catálogo con qué comparar no hay alcance que aislar, y devuelve lo
+    mismo que osa_general.
+    """
+    if fu.vacia("CATALOGO"):
+        return osa_general(fu)
+    valores = [v for (sku, tienda, _), fila in fu.osa.items()
+               if (sku, tienda) in fu.catalogo
+               for v in (_osa_pct(fila.get("osa_pct")),) if v is not None]
+    return round(sum(valores) / len(valores), 1) if valores else None
+
+
+def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
+    """De 100% al OSA real, en puntos porcentuales y por causa.
+
+    El Pareto reparte la VENTA PERDIDA; esto reparte el GAP DE OSA, que es
+    otra cosa y responde otra pregunta: no "qué causa costó más dinero" sino
+    "cuántos puntos de disponibilidad me quitó cada causa". Un día con
+    faltante pesa igual que cualquier otro para el OSA, valga lo que valga.
+
+    El denominador es el universo del alcance —las filas de BOPS_OSA cuyo SKU
+    está en el catálogo de esa tienda— porque es el mismo del que sale
+    `osa_alcance`. Mezclar universos daría un waterfall que no cierra.
+    """
+    if fu.vacia("CATALOGO"):
+        universo = len(fu.osa)
+    else:
+        universo = sum(1 for (sku, tienda, _) in fu.osa if (sku, tienda) in fu.catalogo)
+
+    osa_real = osa_alcance(fu)
+    if not universo or osa_real is None:
+        return {"osa_teorico": 100.0, "osa_real": osa_real, "universo_filas": universo,
+                "escalones": []}
+
+    dias: Dict[str, int] = defaultdict(int)
+    ids: Dict[str, str] = {}
+    resp: Dict[str, str] = {}
+    for dg in dentro_del_alcance(diagnosticos):
+        causa = dg["causa_raiz"]
+        dias[causa] += 1
+        ids[causa] = dg["root_cause_id"]
+        resp[causa] = dg["responsable"]
+
+    escalones = [{
+        "root_cause_id": ids[c],
+        "causa": c,
+        "responsable": resp[c],
+        "dias": dias[c],
+        "puntos_osa": round(dias[c] / universo * 100, 2),
+    } for c in dias]
+    escalones.sort(key=lambda e: -e["puntos_osa"])
+
+    return {
+        "osa_teorico": 100.0,
+        "osa_real": osa_real,
+        "universo_filas": universo,
+        "escalones": escalones,
+    }
+
+
+def fill_rate_proveedor(fu: "Fuentes") -> dict:
+    """El cumplimiento del proveedor en una sola cifra, para la portada.
+
+    Se calcula sobre cajas y no promediando los porcentajes de cada
+    proveedor: un proveedor con un pedido de 3 cajas no puede pesar lo mismo
+    que uno con 6,865 pedidos. Las tres tasas son las mismas del scorecard,
+    agregadas.
+    """
+    pedidas = confirmadas = entregadas = pedidas_con_cita = 0
+    pedidos = citas = sin_cita = 0
+    for d in desempeno_proveedores(fu):
+        pedidas += d.cajas_pedidas
+        confirmadas += d.cajas_confirmadas
+        entregadas += d.cajas_entregadas
+        pedidas_con_cita += d.cajas_pedidas_con_cita
+        pedidos += d.pedidos
+        citas += d.citas
+        sin_cita += d.pedidos_sin_cita
+
+    def tasa(parte, todo):
+        return round(parte / todo * 100, 1) if todo else None
+
+    return {
+        "proveedores": len(desempeno_proveedores(fu)),
+        "pedidos": pedidos,
+        "citas": citas,
+        "pedidos_sin_cita": sin_cita,
+        "cajas_pedidas": pedidas,
+        "cajas_confirmadas": confirmadas,
+        "cajas_entregadas": entregadas,
+        # Entregado sobre pedido: el fill rate de portada.
+        "pct_efectivo": tasa(entregadas, pedidas_con_cita),
+        # Entregado sobre lo que el proveedor confirmó al agendar.
+        "pct_cumplimiento": tasa(entregadas, confirmadas),
+        # Confirmado al agendar sobre lo pedido.
+        "pct_confirmado": tasa(confirmadas, pedidas_con_cita),
+    }
+
+
 def leer_hoja(wb, nombre: str, advertencias: List[str]) -> List[dict]:
     """Lee una hoja de captura: encabezados en la fila 3, datos desde la 6."""
     if nombre not in wb.sheetnames:
@@ -1052,6 +1159,45 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     if aviso:
         _banner(ws, f, 2, 6, aviso, alto=60)
         f += 2
+
+    # De 100% al OSA real, en puntos. Responde otra pregunta que el Pareto de
+    # pesos: no qué causa costó más dinero, sino cuántos puntos de
+    # disponibilidad quitó cada una. Un día con faltante pesa igual que
+    # cualquier otro para el OSA, valga lo que valga.
+    agua = waterfall_osa(fu, diagnosticos)
+    if agua["escalones"]:
+        ws.cell(row=f, column=2, value="Dónde se pierde la disponibilidad").font = TITULO
+        f += 1
+        ws.cell(row=f, column=2, value=(
+            f"Sobre las {agua['universo_filas']:,} filas de BOPS_OSA cuyo SKU está en "
+            f"el catálogo de la tienda. Los puntos suman el gap entre el 100% teórico "
+            f"y el OSA real.")).font = CHICA
+        f += 2
+        _encabezado(ws, f, ["", "Escalón", "Días", "Puntos de OSA", "", "Responsable"])
+        f += 1
+        ws.cell(row=f, column=2, value="OSA teórico").font = NEGRITA
+        ws.cell(row=f, column=4, value=agua["osa_teorico"] / 100).number_format = "0.0%"
+        for j in range(2, 7):
+            ws.cell(row=f, column=j).border = BORDE
+        f += 1
+        for e in agua["escalones"]:
+            ws.cell(row=f, column=2, value=f"{e['root_cause_id']} · {e['causa']}").fill = \
+                PatternFill("solid", fgColor=COLOR_CAUSA.get(e["root_cause_id"], GRIS))
+            ws.cell(row=f, column=3, value=e["dias"])
+            ws.cell(row=f, column=4, value=-e["puntos_osa"] / 100).number_format = "0.00%"
+            ws.cell(row=f, column=6, value=e["responsable"])
+            for j in range(2, 7):
+                ws.cell(row=f, column=j).border = BORDE
+            f += 1
+        ws.cell(row=f, column=2, value="OSA real del periodo").font = NEGRITA
+        c = ws.cell(row=f, column=4, value=(agua["osa_real"] or 0) / 100)
+        c.number_format = "0.0%"
+        c.font = NEGRITA
+        for j in range(2, 7):
+            ws.cell(row=f, column=j).border = BORDE
+            ws.cell(row=f, column=j).fill = PatternFill("solid", fgColor=AMARILLO)
+        f += 3
+
     _encabezado(ws, f, ["", "Causa raíz", "Días", "Venta perdida", "% del total", "Responsable"])
     f += 1
     for fila in resumen_por_causa(en_alcance):
@@ -1132,6 +1278,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
 
     cob = cobertura_modelo(diagnosticos)
     cob["osa_general"] = osa_general(fu)
+    cob["osa_alcance"] = osa_alcance(fu)
 
     ws["B2"] = "Cobertura del modelo"
     ws["B2"].font = TITULO
@@ -1139,11 +1286,14 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     if aviso:
         _banner(ws, f, 2, 6, aviso, alto=60)
         f += 2
-    osa_gral = cob["osa_general"]
+    pct = lambda v: f"{v}%" if v is not None else "n/d"
     filas_resumen = [
-        ("OSA general del periodo", f"{osa_gral}%" if osa_gral is not None else "n/d"),
+        ("OSA del periodo (SKU del catálogo)", pct(cob["osa_alcance"])),
         ("Días con faltante que entregó BOPS", cob["casos_totales"]),
     ]
+    if cob["casos_fuera_de_alcance"]:
+        filas_resumen.insert(1, ("OSA sobre todo lo que entregó BOPS",
+                                 pct(cob["osa_general"])))
     # Las dos coberturas sólo se separan cuando de verdad hay días fuera del
     # catálogo; si no, mostrar ambas sería ruido.
     if cob["casos_fuera_de_alcance"]:
@@ -1311,8 +1461,18 @@ def main() -> int:
 
     cob, par = escribir_resultado(salida, fu, evidencias, diagnosticos)
 
-    if cob["osa_general"] is not None:
-        print(f"\nOSA general del periodo: {cob['osa_general']}%")
+    if cob["osa_alcance"] is not None:
+        print(f"\nOSA del periodo (SKU del catálogo): {cob['osa_alcance']}%")
+        if cob["casos_fuera_de_alcance"] and cob["osa_general"] != cob["osa_alcance"]:
+            print(f"OSA sobre todo lo que entregó BOPS: {cob['osa_general']}% "
+                  f"— mezcla SKU que el catálogo no reconoce")
+
+    agua = waterfall_osa(fu, diagnosticos)
+    if agua["escalones"]:
+        print(f"\nDónde se pierde la disponibilidad  (100% -> {agua['osa_real']}%)")
+        for e in agua["escalones"]:
+            print(f"  -{e['puntos_osa']:>5.2f} pp   {e['causa']:<32} "
+                  f"{e['dias']:>6,} días")
 
     print(f"\nBOPS entregó {cob['casos_totales']:,} días con faltante")
     if cob["casos_fuera_de_alcance"]:
