@@ -41,8 +41,20 @@ primary_region = 'dfw'
   method = 'GET'
   path = '/api/salud'
 
+# 2 GB medidos, no elegidos al tanteo. El layout V5 con sus CSV deja el
+# proceso en 843 MB de pico: 400 MB después de leer las fuentes (430 mil
+# registros entre OSA, pedidos y citas) y el resto al construir el Excel de
+# salida, que openpyxl arma entero en memoria antes de guardarlo. Con los
+# 512 MB anteriores la máquina moría a mitad del análisis.
+#
+# El margen extra es para orcmm_corregir_layout: abre DOS workbooks en modo
+# normal (uno con fórmulas y otro con valores) y ahí no se puede usar
+# read_only, porque hay que reescribir el archivo.
+#
+# La API corre un solo análisis a la vez (ThreadPoolExecutor de 1 worker en
+# api/main.py) justamente para que este pico no se multiplique.
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '512mb'
+  memory = '2gb'
   cpu_kind = 'shared'
   cpus = 1

@@ -3,11 +3,22 @@ ORCMM - API del analizador de desabasto.
 
     uvicorn api.main:app --reload --port 8000     (desde la raíz del proyecto)
 
-Un solo flujo, en tres pasos que el front puede encadenar:
+Un solo flujo, que el front encadena:
 
-    POST /api/validar    ¿el layout está bien? ¿se puede arreglar solo?
-    POST /api/analizar   valida, opcionalmente corrige, clasifica y resume
+    POST /api/validar          ¿el paquete está bien? ¿se puede arreglar solo?
+    POST /api/analizar         encola el análisis y devuelve un id
+    GET  /api/analizar/{id}    estado y, cuando termina, el resumen
     GET  /api/resultado/{id}   descarga el Excel de resultados
+
+Desde el layout V5 el paquete son VARIOS archivos: el .xlsx del layout más los
+CSV de las hojas que ya no caben en una hoja de Excel (TABLEAU_INV_TIENDA son
+2.7 millones de filas). Se pueden subir sueltos o dentro de un .zip — el zip
+es lo recomendable: esos CSV pesan 222 MB sueltos y ~11 MB comprimidos.
+
+El análisis es asíncrono porque con volumen real tarda alrededor de minuto y
+medio, y un request abierto tanto tiempo se lo lleva cualquier proxy de por
+medio. Corre en un solo hilo de trabajo: dos análisis a la vez no caben en la
+memoria de la máquina.
 
 El servidor no guarda nada permanente: cada análisis vive en su carpeta
 temporal y se borra sola pasado un rato.
@@ -18,21 +29,32 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 import time
 import uuid
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from api.servicio import analizar, diagnosticar_layout
+from orcmm_fuentes_csv import hoja_de_archivo
 
-MAX_BYTES = 25 * 1024 * 1024      # el layout lleno pesa ~40 KB; 25 MB es holgado
+# El CSV de inventario más grande de la entrega real pesa 48 MB; el layout
+# lleno, 35 MB. El tope por archivo deja margen sin volverse una invitación.
+MAX_ARCHIVO = 80 * 1024 * 1024
+# Los 6 CSV más el Excel suman ~260 MB sueltos. El mismo tope aplica al
+# contenido expandido de un zip, que es lo que evita un zip bomb.
+MAX_PAQUETE = 400 * 1024 * 1024
 VIDA_TRABAJO_S = 60 * 60          # una hora
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+EXTENSIONES = {".xlsx", ".csv", ".zip"}
 
 # De dónde se acepta al navegador. En local, el front de desarrollo; en
 # despliegue, la variable de entorno, para no tener que redesplegar el back
@@ -43,7 +65,7 @@ ORIGENES = [o.strip() for o in os.getenv("ORCMM_ORIGENES", ORIGENES_LOCALES).spl
             if o.strip()]
 
 app = FastAPI(title="ORCMM — Clasificación de desabasto por causa raíz",
-              version="2.0")
+              version="3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,6 +73,10 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+# Un solo trabajador: el análisis carga el Excel entero y varios índices en
+# memoria, y dos en paralelo tumbarían la máquina. Los demás esperan turno.
+EJECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="orcmm")
 
 
 # ---------------------------------------------------------------------------
@@ -60,54 +86,170 @@ app.add_middleware(
 @dataclass
 class Trabajo:
     carpeta: Path
+    archivo: str = ""
+    estado: str = "en_proceso"
+    resultado: Optional[dict] = None
+    error: Optional[str] = None
     salida: Optional[Path] = None
     nombre_descarga: Optional[str] = None
     creado: float = field(default_factory=time.time)
 
 
 TRABAJOS: Dict[str, Trabajo] = {}
+CANDADO = threading.Lock()
 
 
 def _limpiar_viejos() -> None:
     corte = time.time() - VIDA_TRABAJO_S
-    for id_ in [k for k, t in TRABAJOS.items() if t.creado < corte]:
-        shutil.rmtree(TRABAJOS.pop(id_).carpeta, ignore_errors=True)
+    with CANDADO:
+        viejos = [k for k, t in TRABAJOS.items()
+                  if t.creado < corte and t.estado != "en_proceso"]
+        for id_ in viejos:
+            shutil.rmtree(TRABAJOS.pop(id_).carpeta, ignore_errors=True)
 
 
-async def _recibir(archivo: UploadFile) -> tuple[str, Path]:
-    """Guarda el archivo subido en una carpeta propia y regresa su id.
+# ---------------------------------------------------------------------------
+# Recepción del paquete
+# ---------------------------------------------------------------------------
 
-    El nombre original sólo se usa para etiquetar la descarga; en disco se
-    escribe con un nombre que fija el servidor, para que nada de lo que venga
-    en el request decida una ruta.
+@dataclass
+class Paquete:
+    xlsx: Path
+    csvs: List[Path] = field(default_factory=list)
+    nombre_original: str = "captura.xlsx"
+
+
+def _nombre_seguro(nombre: str) -> str:
+    """Sólo el nombre del archivo, nunca una ruta.
+
+    Vale para lo que sube el usuario y para lo que viene dentro de un zip:
+    una entrada llamada '../../etc/algo' es la forma clásica de escribir
+    fuera de la carpeta de trabajo.
     """
-    if not (archivo.filename or "").lower().endswith(".xlsx"):
-        raise HTTPException(400, "El archivo tiene que ser un .xlsx de captura ORCMM.")
+    return Path(str(nombre or "").replace("\\", "/")).name
 
-    _limpiar_viejos()
-    id_ = uuid.uuid4().hex
-    carpeta = Path(tempfile.mkdtemp(prefix=f"orcmm_{id_}_"))
-    destino = carpeta / "captura.xlsx"
 
+async def _volcar(archivo: UploadFile, destino: Path, presupuesto: int) -> int:
+    """Escribe el archivo subido en disco sin cargarlo entero en memoria."""
     tamano = 0
     with destino.open("wb") as f:
         while trozo := await archivo.read(1024 * 1024):
             tamano += len(trozo)
-            if tamano > MAX_BYTES:
-                shutil.rmtree(carpeta, ignore_errors=True)
-                raise HTTPException(413, f"El archivo pasa de {MAX_BYTES // 1024 // 1024} MB.")
+            if tamano > MAX_ARCHIVO or tamano > presupuesto:
+                raise HTTPException(
+                    413, f"'{_nombre_seguro(archivo.filename)}' pasa del tamaño "
+                         f"permitido ({MAX_ARCHIVO // 1024 // 1024} MB por archivo, "
+                         f"{MAX_PAQUETE // 1024 // 1024} MB en total).")
             f.write(trozo)
+    return tamano
 
-    if tamano == 0:
+
+def _expandir_zip(ruta: Path, carpeta: Path, presupuesto: int) -> List[Path]:
+    """Saca del zip lo que corresponde a una fuente del layout.
+
+    Se ignora todo lo demás —carpetas, archivos de sistema, cualquier otra
+    extensión— y se lleva la cuenta del tamaño ya descomprimido: un zip chico
+    puede expandirse a gigabytes.
+    """
+    salidas: List[Path] = []
+    with zipfile.ZipFile(ruta) as z:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            nombre = _nombre_seguro(info.filename)
+            if not nombre or nombre.startswith(".") or nombre.startswith("~$"):
+                continue
+            ext = Path(nombre).suffix.lower()
+            if ext not in (".xlsx", ".csv"):
+                continue
+
+            presupuesto -= info.file_size
+            if info.file_size > MAX_ARCHIVO or presupuesto < 0:
+                raise HTTPException(
+                    413, f"El contenido del zip pasa de "
+                         f"{MAX_PAQUETE // 1024 // 1024} MB descomprimido.")
+
+            destino = carpeta / nombre
+            with z.open(info) as origen, destino.open("wb") as f:
+                shutil.copyfileobj(origen, f, 1024 * 1024)
+            salidas.append(destino)
+    return salidas
+
+
+async def _recibir(archivos: List[UploadFile]) -> tuple[str, Paquete]:
+    """Guarda el paquete subido en una carpeta propia y regresa su id.
+
+    Se acepta el layout suelto con sus CSV, o todo dentro de un zip. Los
+    nombres originales sólo se usan para etiquetar y para saber a qué hoja
+    corresponde cada CSV; en disco se escriben siempre con un nombre saneado.
+    """
+    if not archivos:
+        raise HTTPException(400, "No llegó ningún archivo.")
+
+    _limpiar_viejos()
+    id_ = uuid.uuid4().hex
+    carpeta = Path(tempfile.mkdtemp(prefix=f"orcmm_{id_}_"))
+
+    try:
+        restante = MAX_PAQUETE
+        recibidos: List[Path] = []
+
+        for archivo in archivos:
+            nombre = _nombre_seguro(archivo.filename)
+            ext = Path(nombre).suffix.lower()
+            if ext not in EXTENSIONES:
+                raise HTTPException(
+                    400, f"'{nombre}': sólo se aceptan .xlsx (el layout), .csv "
+                         f"(las fuentes grandes) o un .zip con todo dentro.")
+
+            destino = carpeta / f"{len(recibidos):02d}{ext}"
+            restante -= await _volcar(archivo, destino, restante)
+
+            if ext == ".zip":
+                try:
+                    salidas = _expandir_zip(destino, carpeta, restante)
+                except zipfile.BadZipFile:
+                    raise HTTPException(400, f"'{nombre}' no se pudo abrir como zip.")
+                destino.unlink(missing_ok=True)
+                if not salidas:
+                    raise HTTPException(
+                        400, f"'{nombre}' no trae ningún .xlsx ni .csv adentro.")
+                recibidos.extend(salidas)
+            else:
+                # El nombre importa: de él sale a qué hoja pertenece cada CSV.
+                final = carpeta / nombre
+                if final != destino:
+                    destino.replace(final)
+                recibidos.append(final)
+
+        xlsxs = [r for r in recibidos if r.suffix.lower() == ".xlsx"]
+        if not xlsxs:
+            raise HTTPException(400, "Falta el .xlsx del layout de captura.")
+        if len(xlsxs) > 1:
+            raise HTTPException(
+                400, f"Llegaron {len(xlsxs)} archivos .xlsx y sólo puede haber un "
+                     f"layout: {', '.join(x.name for x in xlsxs)}.")
+
+        csvs = [r for r in recibidos if r.suffix.lower() == ".csv"]
+        desconocidos = [c.name for c in csvs if hoja_de_archivo(c.name) is None]
+        if desconocidos:
+            raise HTTPException(
+                400, f"Estos CSV no corresponden a ninguna hoja del layout: "
+                     f"{', '.join(desconocidos)}. El nombre del archivo tiene que "
+                     f"empezar con el nombre de la hoja (por ejemplo "
+                     f"TABLEAU_INV_TIENDA_1.csv).")
+
+        if xlsxs[0].stat().st_size == 0:
+            raise HTTPException(400, "El layout llegó vacío.")
+
+        paquete = Paquete(xlsx=xlsxs[0], csvs=csvs, nombre_original=xlsxs[0].name)
+        with CANDADO:
+            TRABAJOS[id_] = Trabajo(carpeta=carpeta, archivo=paquete.nombre_original)
+        return id_, paquete
+
+    except Exception:
         shutil.rmtree(carpeta, ignore_errors=True)
-        raise HTTPException(400, "El archivo llegó vacío.")
-
-    TRABAJOS[id_] = Trabajo(carpeta=carpeta)
-    return id_, destino
-
-
-def _nombre_original(archivo: UploadFile) -> str:
-    return Path(archivo.filename or "captura.xlsx").name
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -121,85 +263,117 @@ def salud() -> dict:
 
 
 @app.post("/api/validar")
-async def validar(archivo: UploadFile = File(...)) -> dict:
-    """Revisa el layout sin analizar. Dice además si se puede corregir solo."""
-    id_, ruta = await _recibir(archivo)
+async def validar(archivos: List[UploadFile] = File(...)) -> dict:
+    """Revisa el paquete sin analizar. Dice además si se puede corregir solo."""
+    id_, paquete = await _recibir(archivos)
+    trabajo = TRABAJOS[id_]
     try:
-        diagnostico = diagnosticar_layout(ruta, TRABAJOS[id_].carpeta)
+        diagnostico = diagnosticar_layout(paquete.xlsx, trabajo.carpeta, paquete.csvs)
     except Exception as e:
         shutil.rmtree(TRABAJOS.pop(id_).carpeta, ignore_errors=True)
-        raise HTTPException(422, f"No se pudo leer el archivo como Excel: {e}")
+        raise HTTPException(422, f"No se pudo leer el paquete: {e}")
 
-    return {"id": id_, "archivo": _nombre_original(archivo), **diagnostico}
+    trabajo.estado = "ok"
+    return {"id": id_, "archivo": paquete.nombre_original, **diagnostico}
 
 
-@app.post("/api/analizar")
+def _correr(id_: str, paquete: Paquete, corregir: bool, forzar: bool,
+            umbral_osa: float) -> None:
+    """El análisis en sí, ya fuera del request. Nunca levanta: deja el motivo
+    en el trabajo para que /api/analizar/{id} lo pueda contar."""
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None:                       # lo limpiaron mientras esperaba turno
+        return
+    try:
+        diagnostico = diagnosticar_layout(paquete.xlsx, trabajo.carpeta, paquete.csvs)
+
+        a_analizar = paquete.xlsx
+        correccion = None
+        if not diagnostico["valido"]:
+            if corregir and diagnostico["ruta_corregida"]:
+                a_analizar = Path(diagnostico["ruta_corregida"])
+                correccion = {
+                    "cambios": diagnostico["cambios_propuestos"],
+                    "errores_que_siguen": diagnostico["errores_tras_correccion"],
+                }
+                # Los errores que la corrección no resuelve (hoja vacía, citas
+                # incompletas) no bloquean: son datos que faltan, no layout
+                # roto, y el modelo ya sabe reportarlos como cobertura perdida.
+            elif not forzar:
+                trabajo.estado = "bloqueado"
+                trabajo.resultado = {"archivo": paquete.nombre_original, **diagnostico}
+                return
+
+        base = Path(paquete.nombre_original).stem
+        trabajo.nombre_descarga = f"Resultado RCA - {base}.xlsx"
+        salida = trabajo.carpeta / "resultado.xlsx"
+
+        resumen = analizar(a_analizar, salida, umbral_osa, paquete.csvs)
+
+        if not resumen["hay_resultados"]:
+            trabajo.estado = "sin_datos"
+            trabajo.resultado = {"archivo": paquete.nombre_original,
+                                 "validacion": diagnostico["validacion"],
+                                 "correccion": correccion, **resumen}
+            return
+
+        trabajo.salida = salida
+        trabajo.estado = "ok"
+        trabajo.resultado = {
+            "archivo": paquete.nombre_original,
+            "validacion": diagnostico["validacion"],
+            "correccion": correccion,
+            "nombre_salida": trabajo.nombre_descarga,
+            **resumen,
+        }
+    except Exception as e:
+        trabajo.estado = "error"
+        trabajo.error = f"El análisis falló: {e}"
+
+
+@app.post("/api/analizar", status_code=202)
 async def analizar_archivo(
-    archivo: UploadFile = File(...),
+    archivos: List[UploadFile] = File(...),
     corregir: bool = Query(False, description="Aplicar la corrección automática de layout."),
+    forzar: bool = Query(False, description="Analizar aunque queden errores que la "
+                                            "corrección automática no puede arreglar."),
     umbral_osa: float = Query(100.0, gt=0, le=100,
                               description="Se analizan los días con OSA por debajo de este valor."),
 ) -> dict:
-    """Valida, opcionalmente corrige, clasifica y devuelve el resumen.
+    """Encola el análisis y devuelve el id con el que se sigue.
 
-    Si el layout trae errores y no se pidió corregir, no analiza: regresa el
-    reporte para que el front ofrezca el arreglo. Analizar sobre un archivo con
-    claves mal capturadas produce un Pareto que se ve bien y está mal.
+    No analiza dentro del request: con volumen real la corrida tarda minutos y
+    el navegador (o cualquier proxy de por medio) cortaría antes. El front hace
+    poll a /api/analizar/{id}.
+
+    Con `forzar` se analiza aun con errores pendientes. Sirve cuando lo que
+    está roto es una hoja de la que sólo depende una parte del reporte —una
+    extracción de citas incompleta afecta al scorecard del proveedor, no al
+    Pareto— y el resultado se puede leer sabiendo eso. La validación viaja
+    entera en la respuesta: se decide con los errores a la vista, no a ciegas.
     """
-    id_, ruta = await _recibir(archivo)
-    trabajo = TRABAJOS[id_]
+    id_, paquete = await _recibir(archivos)
+    EJECUTOR.submit(_correr, id_, paquete, corregir, forzar, umbral_osa)
+    return {"id": id_, "archivo": paquete.nombre_original, "estado": "en_proceso",
+            "seguir_en": f"/api/analizar/{id_}"}
 
-    try:
-        diagnostico = diagnosticar_layout(ruta, trabajo.carpeta)
-    except Exception as e:
-        shutil.rmtree(TRABAJOS.pop(id_).carpeta, ignore_errors=True)
-        raise HTTPException(422, f"No se pudo leer el archivo como Excel: {e}")
 
-    a_analizar = ruta
-    correccion = None
+@app.get("/api/analizar/{id_}")
+def estado_analisis(id_: str) -> dict:
+    """Estado del análisis y, cuando termina, el mismo resumen de siempre."""
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None:
+        raise HTTPException(404, "Ese análisis ya no está disponible. Hay que volver "
+                                 "a subir el paquete.")
 
-    if not diagnostico["valido"]:
-        if not corregir:
-            return {"id": id_, "archivo": _nombre_original(archivo),
-                    "estado": "bloqueado", **diagnostico}
+    if trabajo.estado == "en_proceso":
+        return {"id": id_, "archivo": trabajo.archivo, "estado": "en_proceso",
+                "segundos": round(time.time() - trabajo.creado, 1)}
 
-        if not diagnostico["ruta_corregida"]:
-            return {"id": id_, "archivo": _nombre_original(archivo),
-                    "estado": "bloqueado", **diagnostico}
+    if trabajo.estado == "error":
+        raise HTTPException(422, trabajo.error or "El análisis falló.")
 
-        a_analizar = Path(diagnostico["ruta_corregida"])
-        correccion = {
-            "cambios": diagnostico["cambios_propuestos"],
-            "errores_que_siguen": diagnostico["errores_tras_correccion"],
-        }
-        # Los errores que la corrección no resuelve (hoja vacía, citas
-        # incompletas) no bloquean: son datos que faltan, no layout roto, y el
-        # modelo ya sabe reportarlos como cobertura perdida.
-
-    base = Path(_nombre_original(archivo)).stem
-    trabajo.salida = trabajo.carpeta / "resultado.xlsx"
-    trabajo.nombre_descarga = f"Resultado RCA - {base}.xlsx"
-
-    try:
-        resumen = analizar(a_analizar, trabajo.salida, umbral_osa)
-    except Exception as e:
-        raise HTTPException(422, f"El análisis falló: {e}")
-
-    if not resumen["hay_resultados"]:
-        trabajo.salida = None
-        return {"id": id_, "archivo": _nombre_original(archivo),
-                "estado": "sin_datos", "validacion": diagnostico["validacion"],
-                "correccion": correccion, **resumen}
-
-    return {
-        "id": id_,
-        "archivo": _nombre_original(archivo),
-        "estado": "ok",
-        "validacion": diagnostico["validacion"],
-        "correccion": correccion,
-        "nombre_salida": trabajo.nombre_descarga,
-        **resumen,
-    }
+    return {"id": id_, "estado": trabajo.estado, **(trabajo.resultado or {})}
 
 
 @app.get("/api/resultado/{id_}")
@@ -208,6 +382,6 @@ def descargar(id_: str) -> FileResponse:
     trabajo = TRABAJOS.get(id_)
     if trabajo is None or trabajo.salida is None or not trabajo.salida.exists():
         raise HTTPException(404, "Ese resultado ya no está disponible. Hay que volver "
-                                 "a subir el archivo.")
+                                 "a subir el paquete.")
     return FileResponse(trabajo.salida, media_type=XLSX,
                         filename=trabajo.nombre_descarga or "resultado.xlsx")
