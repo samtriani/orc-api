@@ -28,8 +28,9 @@ proyecto.
 | `orcmm_layout_spec.py` | **Fuente única del layout.** Las 9 hojas, sus campos, tipos y ventanas. Si aquí se agrega un campo, todo lo demás se entera solo. |
 | `orcmm_rca_engine.py` | El motor. Las 10 reglas de la matriz en orden de prioridad. Clasifica **un día** a la vez. |
 | `orcmm_rca_periodo.py` | Agrega los veredictos diarios: por SKU-tienda, Pareto de causas y responsables, cobertura del modelo. |
-| `orcmm_pipeline.py` | Del Excel de captura al Excel de resultados: lee, deriva las banderas del día, clasifica y escribe. |
-| `orcmm_validar_layout.py` | Revisa el archivo contra el spec **antes** de correrlo. No corrige nada. |
+| `orcmm_fuentes_csv.py` | Lee las fuentes que ya no caben en una hoja de Excel y llegan como CSV de Tableau. |
+| `orcmm_pipeline.py` | De la captura al Excel de resultados: lee, deriva las banderas del día, clasifica y escribe. |
+| `orcmm_validar_layout.py` | Revisa el paquete contra el spec **antes** de correrlo, y cruza las fuentes entre sí. No corrige nada. |
 | `orcmm_corregir_layout.py` | Arregla lo que se puede arreglar solo. Nunca toca el original. |
 | `api/` | Backend FastAPI que expone todo lo anterior. |
 | `web/` | Front en Angular. |
@@ -38,21 +39,38 @@ proyecto.
 
 ## Línea de comandos
 
+Desde el layout V5, la captura son **varios archivos**: el `.xlsx` con la
+mayoría de las hojas, más los CSV de las dos que ya no caben en una hoja de
+Excel (`TABLEAU_INV_TIENDA` son 2.7 millones de filas, repartidas en seis
+archivos). Los comandos reciben el Excel primero y los CSV después; se
+reparten solos por el prefijo del nombre de archivo.
+
 ```bash
 pip install -r requirements.txt
 
-# 1. ¿el archivo cumple el layout?
-python orcmm_validar_layout.py "040826_La Comer_Layout de datos RCA (OSA)_V2_Con Datos.xlsx"
+# 1. ¿el paquete cumple el layout? (también cruza las fuentes entre sí)
+python orcmm_validar_layout.py "layout.xlsx" datos/*.csv
 
 # 2. arreglar lo que se pueda (escribe "<archivo> corregido.xlsx", no toca el original)
-python orcmm_corregir_layout.py "040826_La Comer_Layout de datos RCA (OSA)_V2_Con Datos.xlsx"
+python orcmm_corregir_layout.py "layout.xlsx"
 
 # 3. clasificar
-python orcmm_pipeline.py "040826_La Comer_Layout de datos RCA (OSA)_V2_Con Datos corregido.xlsx"
+python orcmm_pipeline.py "layout.xlsx" datos/*.csv
 ```
+
+Un layout anterior al V5, con todas las hojas dentro del Excel, se sigue
+corriendo igual: sin los CSV.
 
 El pipeline acepta `--umbral-osa` (por omisión 100: se analizan todos los días
 que no estén al 100% de disponibilidad) y `-o` para el nombre de salida.
+
+Para revisar un export de Tableau por su cuenta —qué encabezados detecta, qué
+periodo cubre y qué tanto cruza contra los días con faltante— sin correr el
+análisis completo:
+
+```bash
+python orcmm_fuentes_csv.py datos/*.csv --contra "layout.xlsx"
+```
 
 ---
 
@@ -103,18 +121,35 @@ parada en la puerta:
 
 | | Qué es | ¿Bloquea? |
 |---|---|---|
-| **Errores de layout** | Columnas que no existen, claves capturadas como número, tipos que no cuadran. El modelo leería mal. | Sí. Casi siempre los arregla `orcmm_corregir_layout`. |
-| **Datos incompletos** | El layout está bien, faltan renglones (hoja vacía, citas parciales). | No. El motor ya sabe reportarlo como cobertura perdida nombrando el campo. |
+| **Errores de layout** | Columnas que no existen, obligatorios vacíos, claves deformadas al capturarse, hojas que no cuadran entre sí. El modelo leería mal. | Sí, salvo que se pase `forzar`. El validador marca cuáles sabe arreglar `orcmm_corregir_layout`. |
+| **Datos incompletos** | El layout está bien, faltan renglones (hoja vacía, citas parciales, fuentes que no cruzan). | No. El motor ya sabe reportarlo como cobertura perdida nombrando el campo. |
 | **Advertencias** | Vale la pena revisarlo antes de firmar el Pareto. | No. |
 
 ### Endpoints
 
+Todo se sube por un solo campo repetido `archivos`: el `.xlsx` con sus CSV
+sueltos, o un `.zip` con todo dentro. **El zip es lo recomendable** — los CSV
+del layout real pesan 222 MB sueltos y menos de 40 MB comprimidos.
+
 | Método | Ruta | Para qué |
 |---|---|---|
-| `POST` | `/api/validar` | Sólo valida. Dice si el archivo es corregible y qué cambiaría. |
-| `POST` | `/api/analizar?corregir=&umbral_osa=` | Valida, corrige si se pidió, clasifica y devuelve el resumen. |
+| `POST` | `/api/validar` | Sólo valida. Dice si el paquete es corregible y qué cambiaría. |
+| `POST` | `/api/analizar?corregir=&forzar=&umbral_osa=` | Encola el análisis. Responde `202` con el id. |
+| `GET` | `/api/analizar/{id}` | Estado (`en_proceso`) y, al terminar, el resumen. |
 | `GET` | `/api/resultado/{id}` | Descarga el Excel de resultados. |
 | `GET` | `/api/salud` | Ping. |
+
+El análisis es **asíncrono**: con volumen real tarda un par de minutos y un
+request abierto tanto tiempo se lo lleva cualquier proxy de por medio. El
+front encola y hace poll. Corre un solo análisis a la vez, porque dos no caben
+en la memoria de la máquina.
+
+`forzar` analiza aun con errores que la corrección automática no puede
+arreglar. Sirve cuando lo roto es una hoja de la que depende sólo una parte
+del reporte —una extracción de citas incompleta afecta al scorecard del
+proveedor, no al Pareto— y el resultado se puede leer sabiendo eso. La
+validación completa viaja en la respuesta: se decide con los errores a la
+vista, no a ciegas.
 
 El servidor no guarda nada permanente: cada análisis vive en una carpeta
 temporal que se borra sola a la hora.
@@ -167,7 +202,9 @@ SIMA todavía no entrega los pedidos de tienda. Con la prioridad 3 apagada, el
 CEDIS y proveedor.
 
 - Sin el interruptor: **0 %** de cobertura, todo RC99.
-- Con el interruptor: **92.3 %**.
+- Con el interruptor, sobre el layout V5 real: **99.6 %** de los días que
+  entran al alcance (el 92.3 % que decía antes esta línea se midió sobre un
+  archivo de ejemplo de un solo SKU, no sobre volumen real).
 
 El costo es que **RC03 "Pedido No Generado" se vuelve inalcanzable** y sus días
 se reparten entre RC04, RC05 y RC06. Sirve para leer la rama de abasto; no para

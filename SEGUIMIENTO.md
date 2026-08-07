@@ -17,6 +17,83 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-06 (noche) — layout V5: Excel + CSV
+
+El layout dejó de caber en un solo Excel. `TABLEAU_INV_TIENDA` (2.7 millones
+de filas, en 6 archivos) y `TABLEAU_VENTAS` ahora se entregan como CSV
+aparte; el resto sigue en el .xlsx. **El back ya lee las dos cosas como una
+sola fuente.** Todo el análisis y el plan están en
+[`PLAN_MULTIFUENTE.md`](PLAN_MULTIFUENTE.md) — leerlo antes de tocar nada.
+
+**Se hizo:**
+
+1. `orcmm_fuentes_csv.py` nuevo: lee los exportes de Tableau (UTF-16 con BOM,
+   separados por TAB, encabezados con nombre de negocio y la columna de la
+   métrica **sin encabezado**, fechas en texto y en dos idiomas). Streaming y
+   filtrado por llave contra los días con faltante: 2.7 M de filas en 7.5 s
+   con 22 MB de pico. Corre como inspector con `--contra <layout.xlsx>` para
+   verificar un export nuevo en 12 segundos.
+2. `leer_fuentes` recibe un `PaqueteFuentes` (xlsx + CSV agrupados por
+   prefijo del nombre de archivo) y el `umbral_osa`, que es lo que define qué
+   llaves vale la pena guardar.
+3. **Indexación de eventos** (`_indexar_eventos`). Las tres derivaciones del
+   día D recorrían la lista completa de eventos una vez por cada día con
+   faltante: 6.4 mil millones de vueltas, horas de corrida. Ahora cada día
+   toca sólo los suyos: **0.3 s**. Con los datos de ejemplo nunca se notó.
+4. La venta perdida se lee de `BOPS_OSA` (columna nueva en el V5), con
+   `TABLEAU_VENTAS` de respaldo. Sube la cobertura sobre impacto de 0% a 100%.
+5. `CEDIS_AUSENCIA_ES_CERO`: La Comer confirmó que el reporte de CEDIS omite
+   los SKU en cero, así que la ausencia de fila **es** un cero. Única
+   excepción a "vacío no es cero" en todo el modelo; sólo aplica a los días
+   que la extracción cubre. Los días con dato de CEDIS pasan de 17 a 5,201.
+6. **Separación de alcance** (`FUERA_DE_CATALOGO`, `R0_DentroDelCatalogo`):
+   BOPS_OSA entrega SKU de divisiones fuera del alcance (Nivea, Sony,
+   L'Oréal) mientras el catálogo es 100% Abarrotes. Esos días se cuentan
+   aparte, no como dato faltante. Decisión del usuario: **separar, no
+   descartar**.
+7. Validador: entiende los CSV, valida en streaming y **cruza las fuentes**
+   (¿el inventario es de la misma tienda y periodo que OSA?). Refactorizado a
+   una sola pasada por hoja en `read_only`: de 125 s a 40 s.
+8. API v3: subida multi-archivo o **ZIP** (272 MB → 37.9 MB), análisis
+   **asíncrono** con `POST /api/analizar` → `GET /api/analizar/{id}`, un solo
+   worker, y banderas `corregir` / `forzar`. Fly a **2 GB** (medido: 843 MB
+   de pico).
+
+**Resultado sobre los datos reales** (83 s por CLI, 204 s por API):
+
+```
+OSA general 74.5%
+BOPS entregó 30,565 días con faltante
+  25,364 fuera del catálogo ($285,907) — no entran al análisis
+   5,201 dentro del alcance · clasificados 5,181 (99.6%)
+Pareto: 94.1% Ejecución en Tienda · 4.0% Proveedor · 1.4% Compras · 0.2% sin clasificar
+```
+
+**Pendiente para la siguiente sesión:**
+
+- **Desplegar** (`flyctl deploy --ha=false`). Todavía NO se hizo: el cambio de
+  VM a 2 GB va en ese mismo deploy y sin él la máquina muere a mitad del
+  análisis.
+- **El front tiene que cambiar sí o sí**: el contrato es otro (varios
+  archivos o zip, y poll en vez de respuesta directa). La respuesta ya trae
+  las dos coberturas (`cobertura_casos_alcance_pct` y `cobertura_casos_pct`)
+  para encabezar con la del alcance.
+- **Pedirle a La Comer**: (a) el export de BOPS_OSA filtrado a Abarrotes;
+  (b) `CITAS_PROV_CEDIS` está rota — 101,933 de 101,943 filas sin
+  `cedis_destino`, 63,197 sin `fecha_pedido` y 63,197 citas con folio que no
+  existe entre los pedidos. **El scorecard de proveedores no se puede firmar**
+  hasta que se aclare (se ven tasas imposibles, como confirmar 189.5% de lo
+  pedido). El Pareto sí, porque el 94.1% no depende de esa hoja.
+- Que los exportes de Tableau salgan **con encabezado en la cuarta columna**;
+  hoy se asigna por posición y el lector lo advierte en cada corrida.
+- Quedó sin responder: ¿la Vía 2 debe saltarse la pregunta de inventario en
+  CEDIS? Hoy no la salta (comparte reglas 5-8 con la Vía 1, confirmado el
+  2026-08-05), aunque en cross-dock el inventario da cero y pasa de largo
+  igual. Sólo cambia el caso en que el producto está físicamente en CEDIS
+  esperando despacho: hoy eso dictamina RC04 contra CEDIS.
+
+---
+
 ## Sesión 2026-08-06
 
 **Se hizo:**
