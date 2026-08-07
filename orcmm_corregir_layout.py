@@ -47,9 +47,9 @@ import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
-from orcmm_layout_spec import (FILA_DATOS, FILA_DESCRIPCION, FILA_ENCABEZADO,
+from orcmm_layout_spec import (CSV, FILA_DATOS, FILA_DESCRIPCION, FILA_ENCABEZADO,
                                FILA_META, FILA_TIPO, FILA_TITULO, HOJAS,
-                               REGLAS_DE_LLENADO, normalizar_encabezado)
+                               REGLAS_DE_LLENADO, normalizar_encabezado, origen_de)
 from orcmm_validar_layout import CAMPOS_TEXTO_CLAVE
 
 # Si ninguna hoja del archivo trae las filas 1 y 2 bien puestas, se usan estos.
@@ -259,6 +259,8 @@ def corregir(entrada: Path, salida: Path) -> List[str]:
 
     for nombre in HOJAS:
         if nombre not in wb.sheetnames:
+            if origen_de(nombre) == CSV:
+                continue      # se entrega como archivo aparte, no como hoja
             cambios.append(f"{nombre}: la hoja no existe en el archivo, no se puede corregir "
                            f"desde aquí. Hay que agregarla.")
             continue
