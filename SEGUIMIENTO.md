@@ -94,9 +94,54 @@ Pareto: 94.1% Ejecución en Tienda · 4.0% Proveedor · 1.4% Compras · 0.2% sin
 
 ---
 
-## Sesión 2026-08-06
+## Sesión 2026-08-06 (continuación, tarde)
 
 **Se hizo:**
+
+1. `npm install` en `orc-gui` (ahora sobre disco local, ya no Google Drive)
+   — 539 paquetes, sin errores. `npm run build` corre limpio
+   (`ng build`, bundle inicial 202.53 kB, 4.2s). Queda pendiente probar
+   `npm start` (`ng serve`) de forma interactiva, pero el build confirma
+   que el código compila sin errores de TypeScript/plantillas.
+2. **Bug encontrado y corregido:** el front mostraba "OSA general del
+   periodo" como "%" vacío (sin número). Causa: el deploy a Fly.io
+   (`3293f52`, 2026-08-05 23:19) quedó *antes* del commit que agrega
+   `osa_general` (`3f7bc2b`, 2026-08-06 16:02) — la API en producción
+   nunca tuvo el campo nuevo, así que `{{ r.osa_general }}%` en
+   `app.html` interpolaba `undefined`. Se corrió `flyctl deploy --ha=false`
+   de nuevo con el código actual y se verificó contra la API en vivo con
+   el Excel de ejemplo: `osa_general: 76.4`, correcto. **Ojo:** ese deploy
+   quedó atrás de nuevo con el trabajo de layout V5 de la sesión de la
+   noche (ver entrada de arriba) — hace falta un deploy más.
+3. Estilo La Comer en `orc-gui`: colores de marca (naranja `#F0501E` /
+   `#C43C10`, extraídos del favicon oficial de lacomer.com.mx) aplicados
+   al acento visual — franja del header, borde de foco, spinner, botón
+   principal y número de "Descargar". Variable CSS renombrada de
+   `--amarillo` a `--acento`/`--acento-oscuro`/`--acento-suave`.
+   Verificado contraste AA (5.25:1) del botón. → orc-gui `28530f3`.
+   Sigue pendiente el logo (no hay asset oficial descargado todavía).
+
+**Pendiente para la siguiente sesión:**
+
+- Armar CI para `orc-api`: no hay `.github/workflows/` en el repo, así
+  que a diferencia de `orc-gui` (Vercel, que sí redespliega solo en cada
+  push) todo deploy a Fly.io es manual con `flyctl deploy`. Esto fue la
+  causa raíz del bug del punto 2 — un commit se quedó sin desplegar por
+  horas, y ya volvió a pasar con el trabajo de la noche. Propuesta:
+  workflow con `superfly/flyctl-actions` + `FLY_API_TOKEN` como secret,
+  disparado en push a `main`.
+- **Desplegar** `orc-api` con el layout V5 + VM de 2 GB (ver entrada de
+  arriba) — sigue sin hacerse.
+- Logo de La Comer en `orc-gui` (el color de marca ya quedó aplicado,
+  falta el asset gráfico oficial).
+- Cuando SIMA entregue los pedidos de tienda: `EVALUAR_PEDIDO_TIENDA = True`
+  en `orcmm_rca_engine.py`.
+- `RESPONSABLE_PEDIDO_NO_GENERADO` y `RESPONSABLE_SIN_CITA` siguen sin
+  ratificar con La Comer.
+
+---
+
+## Sesión 2026-08-06
 
 1. Validación end-to-end del Excel con datos corregidos contra el pipeline
    completo — 92.3% de cobertura, coincide con lo ya documentado en el
