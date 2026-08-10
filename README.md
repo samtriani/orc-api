@@ -32,6 +32,12 @@ proyecto.
 | `orcmm_pipeline.py` | De la captura al Excel de resultados: lee, deriva las banderas del día, clasifica y escribe. |
 | `orcmm_validar_layout.py` | Revisa el paquete contra el spec **antes** de correrlo, y cruza las fuentes entre sí. No corrige nada. |
 | `orcmm_corregir_layout.py` | Arregla lo que se puede arreglar solo. Nunca toca el original. |
+| `orcmm_db.py` | Conexión a Postgres y upsert genérico — lo usan los tres scripts de abajo. |
+| `orcmm_db_init.py` | Aplica `sql/schema.sql` (crea las tablas). |
+| `orcmm_db_borrar.py` | Vacía las tablas de datos operativos, sin tocar el esquema ni los catálogos informativos. |
+| `orcmm_etl_carga.py` | Carga el layout principal (xlsx + CSV) a Postgres. |
+| `orcmm_etl_catalogos.py` | Carga sucursales y el catálogo de SKU por tienda (aparte del layout de captura). |
+| `orcmm_fuentes_db.py` | Arma un `Fuentes` desde Postgres en vez de un archivo — lo usa `/api/analizar-tienda`. |
 | `api/` | Backend FastAPI que expone todo lo anterior. |
 | `web/` | Front en Angular. |
 
@@ -152,8 +158,10 @@ del layout real pesan 222 MB sueltos y menos de 40 MB comprimidos.
 | Método | Ruta | Para qué |
 |---|---|---|
 | `POST` | `/api/validar` | Sólo valida. Dice si el paquete es corregible y qué cambiaría. |
-| `POST` | `/api/analizar?corregir=&forzar=&umbral_osa=` | Encola el análisis. Responde `202` con el id. |
-| `GET` | `/api/analizar/{id}` | Estado (`en_proceso`) y, al terminar, el resumen. |
+| `POST` | `/api/analizar?corregir=&forzar=&umbral_osa=` | Encola el análisis desde un archivo subido. Responde `202` con el id. |
+| `POST` | `/api/analizar-tienda` | Igual, pero leyendo Postgres: `{tienda, desde, hasta, umbral_osa}` en vez de un archivo. Ver [Persistencia en Postgres](#persistencia-en-postgres-neon). |
+| `GET` | `/api/tiendas` | Tiendas con datos cargados en Postgres, para el selector del front. |
+| `GET` | `/api/analizar/{id}` | Estado (`en_proceso`) y, al terminar, el resumen. Mismo endpoint para los dos tipos de análisis. |
 | `GET` | `/api/resultado/{id}` | Descarga el Excel de resultados. |
 | `GET` | `/api/salud` | Ping. |
 
@@ -204,6 +212,58 @@ objetos, o devolver el Excel en la misma respuesta del análisis.
 
 `auto_stop_machines = 'off'` evita que la máquina se duerma entre el análisis
 y la descarga y se lleve el archivo consigo.
+
+---
+
+## Persistencia en Postgres (Neon)
+
+Las 9 hojas del layout, más dos catálogos informativos, viven también en
+Postgres — así `/api/analizar-tienda` puede correr el mismo motor sin
+volver a subir el Excel. El upload sigue funcionando igual; esto es
+aditivo. `DATABASE_URL` va en un `.env` local (`.gitignore` lo excluye) y,
+en Fly.io, como secreto:
+
+```bash
+fly secrets set DATABASE_URL="postgresql://usuario:password@host/db?sslmode=require"
+```
+
+### Aplicar el esquema
+
+```bash
+python orcmm_db_init.py
+```
+
+Corre `sql/schema.sql` (12 tablas: las 9 del layout, `sucursales`,
+`catalogo_sku_tienda` y `etl_cargas` de bitácora). Usa `IF NOT EXISTS` en
+todo, así que es seguro volver a correrlo.
+
+### Cargar datos
+
+```bash
+# El layout principal (igual que la línea de comandos: xlsx + CSV sueltos)
+python orcmm_etl_carga.py "layout.xlsx" datos/*.csv
+
+# Los catálogos informativos (aparte, no son parte del layout de captura)
+python orcmm_etl_catalogos.py \
+    --sucursales "Listado_sucursales....xlsx" \
+    --sku "Catalogo_Abarrotes_Coyoacan.xlsx" "Catalogo_Abarrotes_Centenario.xlsx" ...
+```
+
+Todo se carga por **UPSERT** sobre la llave natural de cada hoja — nunca
+reemplazo total. Por eso volver a correrlo con una entrega corregida (o la
+misma entrega dos veces) es seguro: no duplica filas.
+
+### Borrar datos
+
+```bash
+python orcmm_db_borrar.py --si
+```
+
+Vacía las 9 tablas del layout + la bitácora, **sin tocar el esquema ni los
+catálogos informativos** (`sucursales`/`catalogo_sku_tienda` tienen su
+propio ciclo de vida — no se recargan cada vez que llega una versión nueva
+de los datos operativos). Para incluirlos también: `--con-catalogos`. Sin
+`--si` no borra nada, sólo avisa qué haría.
 
 ---
 
