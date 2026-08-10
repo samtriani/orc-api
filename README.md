@@ -241,7 +241,7 @@ todo, así que es seguro volver a correrlo.
 
 ```bash
 # El layout principal (igual que la línea de comandos: xlsx + CSV sueltos)
-python orcmm_etl_carga.py "layout.xlsx" datos/*.csv
+python orcmm_etl_carga.py "layout.xlsx" datos/*.csv --forzar
 
 # Los catálogos informativos (aparte, no son parte del layout de captura)
 python orcmm_etl_catalogos.py \
@@ -252,6 +252,14 @@ python orcmm_etl_catalogos.py \
 Todo se carga por **UPSERT** sobre la llave natural de cada hoja — nunca
 reemplazo total. Por eso volver a correrlo con una entrega corregida (o la
 misma entrega dos veces) es seguro: no duplica filas.
+
+`orcmm_etl_carga.py` corre `validar_archivo` antes de cargar y **aborta si
+hay errores**, salvo `--forzar`. En la práctica casi siempre hace falta:
+el validador marca `COMPRAS_PEDIDOS_PROV.fecha_recibo` vacío como error
+aunque es normal (pedidos que todavía no se reciben — ver "Huecos
+conocidos de la matriz" más abajo), así que toda entrega nueva se carga
+con `--forzar` de entrada. `--sin-validar` salta la validación por
+completo si hace falta ir más rápido.
 
 ### Borrar datos
 
