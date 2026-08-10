@@ -76,12 +76,14 @@ apoyado en el esquema ya cargado.
    que arma el `Fuentes`). En local, correr sin `--reload` salvo que se
    esté editando código activamente.
 
+**Desplegado y verificado en producción** (mismo día): `fly secrets set
+DATABASE_URL=...` + `flyctl deploy --ha=false`. `GET /api/tiendas` y
+`POST /api/analizar-tienda` contra `https://orc-api.fly.dev` dan
+exactamente los mismos números que en local (`osa_general` 74.5%,
+`casos_totales` 30565, 94.1% RC01) y la descarga del Excel funciona.
+
 **Pendiente para la siguiente sesión:**
 
-- **No se ha desplegado a Fly.io.** Falta `fly secrets set
-  DATABASE_URL="postgresql://..."` (mismo mecanismo que `ORCMM_ORIGENES`)
-  y `flyctl deploy --ha=false`, luego probar `/api/tiendas` y
-  `/api/analizar-tienda` en producción.
 - Sólo hay una tienda cargada (287). Cuando haya más, vale la pena volver a
   medir tiempos: hoy `catalogo`/`compras_pedidos_prov`/`citas_prov_cedis`
   casi no se benefician del filtro por tienda porque todo lo cargado es de
