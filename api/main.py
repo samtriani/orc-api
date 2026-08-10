@@ -35,15 +35,27 @@ import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from psycopg2.extras import RealDictCursor
+from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
-from api.servicio import analizar, diagnosticar_layout
-from orcmm_fuentes_csv import hoja_de_archivo
+# En Fly.io DATABASE_URL llega por `fly secrets set` (variable de entorno
+# real); en desarrollo local no existe ese secreto, así que se carga del
+# .env si está — no hace nada si el archivo no existe.
+load_dotenv()
+
+from api.servicio import analizar, diagnosticar_layout               # noqa: E402
+from orcmm_db import conectar                                        # noqa: E402
+from orcmm_fuentes_csv import hoja_de_archivo                        # noqa: E402
+from orcmm_fuentes_db import leer_fuentes_db                         # noqa: E402
 
 # El CSV de inventario más grande de la entrega real pesa 48 MB; el layout
 # lleno, 35 MB. El tope por archivo deja margen sin volverse una invitación.
@@ -329,6 +341,110 @@ def _correr(id_: str, paquete: Paquete, corregir: bool, forzar: bool,
     except Exception as e:
         trabajo.estado = "error"
         trabajo.error = f"El análisis falló: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Análisis directo desde Postgres — misma cola/Trabajo que el de archivo,
+# pero sin diagnosticar_layout/corregir/forzar: no hay archivo que validar,
+# el ETL (orcmm_etl_carga.py) ya validó y dejó constancia al cargar.
+# ---------------------------------------------------------------------------
+
+class SolicitudTienda(BaseModel):
+    tienda: str
+    desde: date
+    hasta: date
+    umbral_osa: float = Field(100.0, gt=0, le=100)
+
+
+def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
+                      umbral_osa: float) -> None:
+    """Mismo patrón que _correr: nunca levanta, deja el motivo en trabajo.error."""
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None:
+        return
+    try:
+        fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa)
+        trabajo.nombre_descarga = f"Resultado RCA - tienda {tienda}.xlsx"
+        salida = trabajo.carpeta / "resultado.xlsx"
+        resumen = analizar(None, salida, umbral_osa, fu=fu)
+
+        # El front espera 'validacion'/'correccion' siempre presentes (mismas
+        # claves que _correr ya manda) — aquí van vacías porque no hay
+        # archivo que validar.
+        validacion_vacia = {"errores": [], "faltan_datos": [], "advertencias": [], "ok": []}
+
+        if not resumen["hay_resultados"]:
+            trabajo.estado = "sin_datos"
+            trabajo.resultado = {"archivo": trabajo.archivo, "validacion": validacion_vacia,
+                                 "correccion": None, **resumen}
+            return
+
+        trabajo.salida = salida
+        trabajo.estado = "ok"
+        trabajo.resultado = {
+            "archivo": trabajo.archivo,
+            "validacion": validacion_vacia,
+            "correccion": None,
+            "nombre_salida": trabajo.nombre_descarga,
+            **resumen,
+        }
+    except Exception as e:
+        trabajo.estado = "error"
+        trabajo.error = f"El análisis desde base de datos falló: {e}"
+
+
+@app.post("/api/analizar-tienda", status_code=202)
+async def analizar_tienda(cuerpo: SolicitudTienda) -> dict:
+    """Igual que /api/analizar, pero lee de Postgres para una tienda y un
+    periodo en vez de un archivo subido. La tienda es obligatoria y única:
+    el análisis siempre corre sobre exactamente la tienda pedida."""
+    if cuerpo.hasta < cuerpo.desde:
+        raise HTTPException(400, "'hasta' no puede ser anterior a 'desde'.")
+
+    _limpiar_viejos()
+    id_ = uuid.uuid4().hex
+    carpeta = Path(tempfile.mkdtemp(prefix=f"orcmm_bd_{id_}_"))
+    etiqueta = f"Tienda {cuerpo.tienda} · {cuerpo.desde} a {cuerpo.hasta}"
+    with CANDADO:
+        TRABAJOS[id_] = Trabajo(carpeta=carpeta, archivo=etiqueta)
+
+    EJECUTOR.submit(_correr_desde_bd, id_, cuerpo.tienda, cuerpo.desde, cuerpo.hasta,
+                     cuerpo.umbral_osa)
+    return {"id": id_, "archivo": etiqueta, "estado": "en_proceso",
+            "seguir_en": f"/api/analizar/{id_}"}
+
+
+def _listar_tiendas() -> list:
+    conn = conectar()
+    try:
+        with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT c.tienda, s.nombre, s.formato,
+                       MIN(b.fecha) AS fecha_min, MAX(b.fecha) AS fecha_max
+                FROM (SELECT DISTINCT tienda FROM catalogo) c
+                JOIN bops_osa b ON b.tienda = c.tienda
+                LEFT JOIN sucursales s ON s.tienda = c.tienda
+                GROUP BY c.tienda, s.nombre, s.formato
+                ORDER BY c.tienda
+            """)
+            filas = cur.fetchall()
+    finally:
+        conn.close()
+    return [{**f, "fecha_min": f["fecha_min"].isoformat() if f["fecha_min"] else None,
+             "fecha_max": f["fecha_max"].isoformat() if f["fecha_max"] else None}
+            for f in filas]
+
+
+@app.get("/api/tiendas")
+async def tiendas() -> dict:
+    """Tiendas con datos cargados en Postgres, para el selector del front.
+    Sólo las que ya tienen BOPS_OSA (si no, elegirlas sólo llevaría a "sin
+    datos"); nombre/formato son informativos, de la tabla `sucursales`."""
+    try:
+        filas = await run_in_threadpool(_listar_tiendas)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo leer la base de datos: {e}")
+    return {"tiendas": filas}
 
 
 @app.post("/api/analizar", status_code=202)

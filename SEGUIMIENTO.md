@@ -10,10 +10,171 @@ las entradas viejas — así queda el historial de decisiones.
 - **`orc-api`** (este repo) — motor de clasificación (`orcmm_rca_engine.py`),
   pipeline (`orcmm_pipeline.py`), API FastAPI (`api/`). Desplegado en Fly.io:
   https://orc-api.fly.dev
+- **Postgres (Neon)** — capa raw persistente de las 9 hojas del layout +
+  2 catálogos informativos. `DATABASE_URL` vive en `orc-api/.env` (git-
+  ignorado, nunca se sube) y, en Fly.io, como `fly secrets set
+  DATABASE_URL=...`. Esquema en `sql/schema.sql`, se aplica con `python
+  orcmm_db_init.py`. El motor de clasificación **ya puede leer de aquí**:
+  `POST /api/analizar-tienda` (tienda + periodo, sin subir archivo) además
+  del `POST /api/analizar` de siempre (sube archivo). Ver sesión 2026-08-10.
 - **`orc-gui`** ([github.com/samtriani/orc-gui](https://github.com/samtriani/orc-gui)) —
   front Angular. Desplegado en Vercel: https://orc-gui.vercel.app — hace
   *rewrite* server-side de `/api/*` hacia Fly.io, así que no hay CORS de por
   medio entre el navegador y el back.
+
+---
+
+## Sesión 2026-08-10 (continuación) — analizar directo desde Postgres
+
+Fase 2 de la entrada de abajo: el motor de clasificación ya puede correr
+contra la base en vez de un archivo subido. Se hizo en la misma sesión,
+apoyado en el esquema ya cargado.
+
+**Se hizo:**
+
+1. **`orcmm_fuentes_db.py`** — arma un `Fuentes` con `SELECT` en vez de
+   `openpyxl`. Reutiliza `_indexar_eventos`, `_revisar_cobertura_de_citas`,
+   `aviso_prioridad_3` tal cual (son funciones planas sobre `Fuentes`, no
+   Excel-específicas). `catalogo`/`bops_osa`/`tableau_inv_tienda`/
+   `tableau_ventas` se filtran por tienda; `cedis_inventario`,
+   `compras_pedidos_prov` y `citas_prov_cedis` NO tienen columna `tienda` —
+   se filtran por el `cedis_surtidor` de esa tienda (`catalogo`). Las 4
+   tablas de evento llevan 30 días de lookback antes de `desde` (mismo
+   criterio que ya documentaba el layout de Excel: "un tránsito de febrero
+   explica faltantes del 1 de marzo").
+2. **`api/servicio.py::analizar()`** gana un parámetro opcional `fu`: si ya
+   viene armado, se usa tal cual y se salta `leer_fuentes`. Todo lo de ahí
+   en adelante (`derivar_evidencias`, `clasificar`, `escribir_resultado`)
+   es 100% agnóstico del origen — cero cambios necesarios.
+3. **`POST /api/analizar-tienda`** (tienda + desde + hasta, JSON) y
+   **`GET /api/tiendas`** (catálogo para el selector del front, sólo
+   tiendas que ya tienen `BOPS_OSA` cargado — hoy nada más 287/Coyoacán).
+   Reutiliza `Trabajo`/`TRABAJOS`/`CANDADO`/`EJECUTOR`/`_limpiar_viejos`
+   sin tocarlos; `GET /api/analizar/{id}` y `GET /api/resultado/{id}`
+   tampoco cambiaron. Sin `diagnosticar_layout`/`corregir`/`forzar`: no hay
+   archivo que validar, el ETL ya lo hizo al cargar.
+4. **Bug de rendimiento encontrado y corregido tras probarlo con datos
+   reales**: la primera versión traía `TABLEAU_INV_TIENDA`/
+   `TABLEAU_VENTAS` filtradas sólo por tienda+fecha, sin aplicar el mismo
+   filtro de "sólo los días con faltante real" que ya usa el flujo de CSV
+   (`orcmm_fuentes_csv.llaves_con_faltante`). Resultado medido: 2.66M de
+   2.72M filas traídas para nada, 97 de 119s de una corrida completa.
+   Corregido con un `JOIN unnest(...)` contra las llaves `(sku, fecha)` que
+   `BOPS_OSA` ya marcó con faltante — **de 119s a 16s**, mismo resultado
+   exacto (verificado número por número). Lección: "SQL ya filtra por
+   tienda/fecha" no es lo mismo que "SQL filtra por lo que el modelo
+   realmente necesita" — el filtro que importaba era el segundo.
+5. **`api/main.py` ahora carga `.env`** (`load_dotenv()` al importar) — sin
+   esto `DATABASE_URL` no existía al correr `uvicorn` en local. En Fly.io
+   no hace nada (no hay `.env`, la variable ya viene del secreto).
+6. Front (`orc-gui`): nuevo modo "Elegir tienda y periodo" junto al de
+   subir archivo (aditivo, no lo reemplaza). Tienda de selección única y
+   obligatoria — el análisis siempre corre sobre una sola. Ver
+   `SEGUIMIENTO.md` de `orc-gui` / los commits del front para el detalle.
+7. **Ojo con `--reload` de uvicorn en Windows**: ralentiza mucho las
+   corridas (vigila archivos todo el tiempo, compite por CPU con el hilo
+   que arma el `Fuentes`). En local, correr sin `--reload` salvo que se
+   esté editando código activamente.
+
+**Pendiente para la siguiente sesión:**
+
+- **No se ha desplegado a Fly.io.** Falta `fly secrets set
+  DATABASE_URL="postgresql://..."` (mismo mecanismo que `ORCMM_ORIGENES`)
+  y `flyctl deploy --ha=false`, luego probar `/api/tiendas` y
+  `/api/analizar-tienda` en producción.
+- Sólo hay una tienda cargada (287). Cuando haya más, vale la pena volver a
+  medir tiempos: hoy `catalogo`/`compras_pedidos_prov`/`citas_prov_cedis`
+  casi no se benefician del filtro por tienda porque todo lo cargado es de
+  una sola tienda — con varias tiendas cargadas esas consultas también
+  deberían acelerarse solas.
+- `compras_pedidos_prov` con llave `(folio, sku)` sigue con la limitación
+  conocida (~0.6% de filas con múltiples fechas de recibo, se queda con la
+  última) — documentada en la sesión anterior, no se tocó.
+
+---
+
+## Sesión 2026-08-10 — persistencia en Postgres (Neon): esquema + ETL
+
+El usuario ya tiene una instancia de Postgres en Neon y quiere dejar de
+re-subir el Excel en cada corrida. Esta sesión se acotó a diseñar el
+esquema y el ETL que carga las fuentes ahí — **el motor de clasificación
+sigue leyendo del Excel/CSV subido, no de la base** (eso es la fase 2, ver
+pendientes). El upload en `orc-gui` sigue igual; esto es aditivo.
+
+**Se hizo:**
+
+1. **Esquema raw** (`sql/schema.sql`, aplicado con `orcmm_db_init.py`,
+   idempotente — todo `IF NOT EXISTS`): una tabla por cada una de las 9
+   hojas del layout, llave primaria = llave natural de cada una (sin ID
+   sustituto), sin `FOREIGN KEY` entre hojas a propósito (huecos de
+   cobertura legítimos y ya medidos, p. ej. 61% de citas sin match en
+   compras). Más `etl_cargas` (bitácora de cada corrida).
+2. **`orcmm_etl_carga.py`** — CLI que carga el `.xlsx` + los CSV sueltos a
+   Postgres por `UPSERT` (idempotente). Reutiliza el mismo parseo que ya
+   usa el pipeline (`leer_hoja`, `leer_csv`, los 4 conversores de tipo,
+   `validar_archivo`) — no se reescribió nada de eso. A diferencia del
+   pipeline de clasificación, llama a `leer_csv` con `llaves=None`: guarda
+   TODAS las filas, no sólo los días con faltante.
+3. **Bug real encontrado y corregido en el diseño**: la llave de
+   `CITAS_PROV_CEDIS` se había definido como `folio_cita` solo, por una
+   lectura literal de "único por cita" en el spec. Al cargar la entrega V5
+   real (39,840 filas) colapsó a 3,922 — **90% de pérdida silenciosa**,
+   porque una cita sí cubre varios SKU (verificado: folio_cita 957821 trae
+   7 SKU distintos). Corregido a `(folio_cita, sku)` → 37,625 filas reales.
+   Lección: no confiar en la redacción del spec para la llave sin
+   verificarla contra el dato real cuando hay ambigüedad.
+4. **Límite conocido, no corregido a propósito**: `COMPRAS_PEDIDOS_PROV`
+   con llave `(folio, sku)` pierde ~0.6% de filas (4,967 de 848,027) por
+   entregas parciales del mismo pedido en fechas de recibo distintas. No
+   se agregó `fecha_recibo` a la llave porque los ~120,816 pedidos sin
+   recibir comparten `NULL`, y Postgres no considera dos `NULL` iguales
+   para el `UNIQUE` — eso habría roto la idempotencia (cada re-carga
+   generaría filas nuevas en vez de pisar las existentes). Se documenta
+   como límite aceptado, no como bug.
+5. **Carga real contra la entrega V5** (`OneDrive_1_8-10-2026/`, Excel de
+   61 MB + 7 CSV, ~250 MB): CATALOGO 26,407 · TABLEAU_INV_TIENDA 2,719,780 ·
+   BOPS_OSA 119,958 · TABLEAU_VENTAS 254,986 · CEDIS_INVENTARIO 23,349 ·
+   CEDIS_TRANSFERENCIAS 30,000 · SIMA_PEDIDOS_TIENDA 0 (sigue vacía) ·
+   COMPRAS_PEDIDOS_PROV 848,027 · CITAS_PROV_CEDIS 37,625. Verificada
+   idempotencia corriendo el CLI completo dos veces (conteos idénticos).
+6. **Dos tablas informativas nuevas** (`sucursales`, `catalogo_sku_tienda`)
+   + `orcmm_etl_catalogos.py`, a partir de archivos que llegaron aparte
+   (`Catalogos SKU/`): listado de las 94 sucursales de todo el grupo (La
+   Comer, Fresko, City Market, City Café, Sumesa) y el catálogo completo de
+   SKU de 5 tiendas (107,339 filas). **Explícitamente informativas**: el
+   motor sigue usando `catalogo` (la hoja del layout), porque a estos
+   catálogos nuevos les falta `cedis_surtidor`. Los 5 archivos de SKU NO
+   comparten el mismo encabezado entre sí (una trae "Codigo" y "Código de
+   Barras" duplicados, otra un "code" extra, tres no traen Línea/Vía) — el
+   lector empareja columnas por nombre con alias, no por posición fija, y
+   sólo `sku`/`tienda` son obligatorios. También manejan `"NA"` (texto
+   literal, no `#N/A` de fórmula) como dato ausente en columnas numéricas —
+   filtro local en `orcmm_etl_catalogos.py`, sin tocar el conversor
+   compartido de `orcmm_pipeline.py`.
+7. **`sql/borrar_datos.sql`** + **`orcmm_db_borrar.py`** — vacía las 12
+   tablas (`TRUNCATE`, deja el esquema) sin re-cargar nada. Exige `--si`
+   explícito. Trae también un `DROP TABLE` comentado por si algún día hace
+   falta tirar el esquema completo.
+
+**Pendiente para la siguiente sesión:**
+
+- **Fase 2, no empezada**: que el motor de clasificación lea de Postgres
+  en vez de archivos subidos. Las 9 tablas raw ya están pensadas para
+  reconstruir el mismo `Fuentes` dataclass que arma `leer_fuentes` (mismas
+  llaves naturales), así que sería mecánico — un `orcmm_fuentes_db.py`
+  nuevo, sin tocar `derivar_evidencias`/`clasificar`/`escribir_resultado`.
+  Ahí también se decide: nuevo endpoint en la API, tabla de resultados
+  (`diagnosticos`), y si conviene una columna `carga_id` de linaje fila por
+  fila en las tablas raw (se dejó fuera por simplicidad).
+- `SIMA_PEDIDOS_TIENDA` sigue vacía en la entrega V5 — mismo pendiente de
+  siempre con SIMA.
+- Revisar con Compras si `catalogo_sku_tienda` (107,339 filas, 5 tiendas)
+  eventualmente debe reemplazar a `catalogo` (26,407 filas) como fuente
+  para el motor — hoy no puede porque le falta `cedis_surtidor`.
+- `requirements.txt` creció con `psycopg2-binary` y `python-dotenv` — no
+  hace falta nada en Fly.io todavía porque esta fase no toca `api/`, pero
+  cuando la fase 2 exponga esto en la API, `DATABASE_URL` se pone igual que
+  `ORCMM_ORIGENES` hoy: `fly secrets set`.
 
 ---
 

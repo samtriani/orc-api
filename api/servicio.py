@@ -187,13 +187,18 @@ def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
     } for d in desempeno_proveedores(fu)]
 
 
-def analizar(ruta: Path, salida: Path, umbral_osa: float = 100.0, csvs=None) -> dict:
+def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
+             csvs=None, fu: Optional[Fuentes] = None) -> dict:
     """Corre el pipeline completo y devuelve el resumen que ve la pantalla.
 
     Es la misma pasada que produce el Excel: se lee una vez, se clasifica una
     vez y de ahí salen las dos salidas.
+
+    Si `fu` ya viene armado (p. ej. desde orcmm_fuentes_db.leer_fuentes_db,
+    con datos de Postgres en vez de un archivo) se usa tal cual y `ruta`/
+    `csvs` se ignoran — todo lo de aquí en adelante sólo lee de `Fuentes`.
     """
-    fu = leer_fuentes(PaqueteFuentes.desde(ruta, csvs or []), umbral_osa)
+    fu = fu or leer_fuentes(PaqueteFuentes.desde(ruta, csvs or []), umbral_osa)
     evidencias = derivar_evidencias(fu, umbral_osa)
 
     if not evidencias:
