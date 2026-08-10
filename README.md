@@ -72,6 +72,24 @@ análisis completo:
 python orcmm_fuentes_csv.py datos/*.csv --contra "layout.xlsx"
 ```
 
+### Auditar un SKU
+
+El resultado dictamina 30 mil días de golpe. Cuando uno se ve raro —o cuando un
+SKU que debería aparecer no aparece— hay que ir a las ocho fuentes y cruzarlas.
+`orcmm_expediente.py` hace ese cruce y deja el dato crudo de cada hoja al lado
+del veredicto:
+
+```bash
+python orcmm_expediente.py 663985002478 "layout.xlsx" datos/*.csv \
+    --tienda 287 --resultado "Resultado RCA.xlsx"
+```
+
+Sólo el layout es obligatorio; sin CSV y sin `--resultado` se omiten esas
+secciones. Sirve sobre todo para el caso mudo: **un SKU que no produjo ni una
+fila**. Casi siempre es que `BOPS_OSA` nunca lo reportó —el análisis arranca de
+los días con faltante que entrega BOPS—, y eso no se ve en ningún lado porque
+el SKU simplemente no está. El expediente lo dice con todas sus letras.
+
 ---
 
 ## Aplicación web

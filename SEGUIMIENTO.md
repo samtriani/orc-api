@@ -68,8 +68,51 @@ pares explica el desvío completo**. `cajas_entregadas` en cambio **sí es dato
 real** (8.0% no se presentó, 5.9% parcial, nunca excede), así que
 `cumplimiento` y `efectivo` se sostienen y la prioridad 8 se salva.
 
+**Herramienta nueva: `orcmm_expediente.py`.** Cruza las ocho fuentes para un
+SKU y deja el dato crudo al lado del veredicto. Se armó para auditar el caso
+mudo —un SKU que no produce ni una fila— que desde el Excel de salida no se
+puede diagnosticar. Uso en el README.
+
+**Dos auditorías que salieron de ahí, y las dos preocupan:**
+
+1. `7506425626212` (papel higiénico Petalo, tienda 287) — **0 días
+   clasificados, y está bien**: nunca se agotó. 44 días de existencia, mínimo
+   7 piezas, resurtido antes de romper. BOPS nunca lo reportó porque no hubo
+   faltante. Sirve como control negativo del modelo. Pero destapó que
+   **COMPRAS y CITAS se contradicen**: el folio 26300919602 aparece en COMPRAS
+   con 148 de 148 cajas entregadas y recibo el 3-feb, y en CITAS con 28
+   entregadas de 148 confirmadas. 120 cajas de diferencia sobre el mismo folio
+   y el mismo SKU. Además COMPRAS trae `fecha_cita` vacía aunque la cita
+   existe.
+2. `663985002478` (vino Malleolus Emilio Moro, tienda 287) — **el SKU de mayor
+   impacto de todo el Pareto**, $6,177 en 39 días como RC01 Ejecución en
+   Tienda. La regla es correcta —BOPS dice OSA 0 y el sistema dice que hay
+   inventario, así que el producto está en tienda y no en anaquel— pero el
+   dato de abajo **no se sostiene**: la existencia está congelada en 3.00
+   exactas del 16-feb al 19-mar, salta a 9.00 y se queda congelada hasta el
+   31-mar. Cero movimiento en 44 días, y `TABLEAU_VENTAS` sólo trae un
+   registro (31-mar, importe 0). Un vino que no vende una sola botella en seis
+   semanas con "3 en existencia" es **inventario fantasma**, no una falla de
+   acomodo. Si se confirma, una parte del 94.1% de RC01 no es ejecución sino
+   exactitud de inventario — que es otro dueño y otra solución (conteo
+   cíclico, ajuste), no "surtir el anaquel".
+
+**Hallazgo de modelo: pedidos zombi.** En ese mismo expediente, el motor eligió
+como "orden vigente que explica el faltante" un pedido del **14-jul-2025** (10
+cajas, sin `fecha_recibo`, 0 entregadas) para explicar días de febrero y marzo
+de 2026. `derivar_orden_proveedor` deja vigente todo pedido sin recibo, y en
+COMPRAS hay **120,816 filas con `cajas_entregadas` = 0**, muchas sin recibo:
+nunca se cierran y se acumulan. Aquí no cambió el veredicto porque RC01 dispara
+en prioridad 1, antes de llegar a la rama de proveedor — pero en los días que
+sí bajan a proveedor, la orden elegida puede tener meses de antigüedad. Vale la
+pena acotar la vigencia por una ventana razonable (¿el lead time del SKU?).
+
 **Pendiente para la siguiente sesión:**
 
+- **Validar el inventario fantasma** con La Comer sobre el caso del vino: es la
+  línea más grande del Pareto y el diagnóstico cambia de dueño según la
+  respuesta.
+- **Acotar la vigencia de los pedidos** en `derivar_orden_proveedor`.
 - **No publicar `pct_confirmado`** mientras `cajas_confirmadas_cita` sea copia
   del pedido. Decidir además si `_aplicar_citas` debe seguir sumando ese campo
   entre citas vencidas — es cambio de criterio, quedó sin tocar a propósito.
