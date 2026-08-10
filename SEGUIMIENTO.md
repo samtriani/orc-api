@@ -17,6 +17,81 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-09 (cierre) — deploy, front con filtros, y los dos "errores de layout"
+
+**Se hizo:**
+
+1. **`orc-api` desplegado en Fly.io** — versión 7, imagen
+   `deployment-01KZMTWGW9JH…`, una sola máquina (`--ha=false`), health check
+   pasando y verificado en vivo contra `https://orc-api.fly.dev/api/salud`.
+   Con esto se salda el pendiente que arrastraba dos sesiones: producción ya
+   corre el fix de `#N/A`. El deploy avisa que la app "no escucha en
+   0.0.0.0:8080" — es falso positivo de temporización, revisa antes de que
+   uvicorn termine de bindear; el health check posterior y el 200 desde fuera
+   lo desmienten.
+2. **Front: filtros y paginación** (orc-gui `6f4b6b4`). Barra sticky con SKU,
+   tienda, causa raíz, responsable y proveedor; paginación a 20 en las siete
+   tablas; SKU clicables; ficha del SKU buscado. `paginacion.ts` es nuevo y
+   reutilizable.
+3. Se mataron dos uvicorn huérfanos (del 5 y el 7 de agosto) que tenían
+   tomados los puertos 8000 y 8080. **El del 8000 servía código de dos días
+   antes**, así que lo que se probara contra la API en ese rato no reflejaba
+   los cambios. Vale la pena revisar que no queden procesos viejos antes de
+   dar por bueno un resultado.
+
+**Los dos "errores de layout" que reportó Compras — medidos, y ninguno es
+problema de rango:**
+
+- **`fecha_recibo` con 120,816 vacíos.** No es censura por corte de ventana:
+  el porcentaje de vacíos está **plano entre 10% y 15% en los 14 meses**
+  (jun-2025 11.2%, dic-2025 20.4%, jun-2026 15.2%). Si fuera "todavía no
+  llega", los meses viejos estarían en ~0%. Lo que pasa es que **el spec se
+  contradice**: `orcmm_layout_spec.py:222` marca el campo obligatorio y su
+  propia descripción dice "VACÍO si no se recibió". El validador hace lo que
+  se le pidió; el que está mal es el spec. Hay que ponerlo opcional — **pero
+  junto con acotar la vigencia de los pedidos**, porque ese mismo vacío es lo
+  que produce los pedidos zombi.
+- **62,102 citas huérfanas (60.9%).** Tampoco es rango: su `fecha_cita` cae
+  entre 2026-02-01 y 2026-03-31, dentro de la ventana de COMPRAS
+  (2025-05 a 2026-06), y los 8,509 folios huérfanos están **100% dentro del
+  rango numérico** de los folios de COMPRAS — intercalados, no en un tramo
+  faltante. Además hay **0 casos** de "folio sí, SKU no": es puramente a nivel
+  folio. Y el conteo de `#N/A` es **exactamente 62,102**, el mismo número: el
+  `XLOOKUP` falla justo en las huérfanas, son dos síntomas de lo mismo.
+  **La causa se ve en el proveedor**: el 79.2% de las huérfanas trae un
+  `proveedor_id` que no existe en COMPRAS — TRUPER, REVLON, GRISI, BDF,
+  textiles, juguetes. **COMPRAS llegó filtrado a las divisiones del alcance y
+  CITAS llegó completo, con las compras de toda la tienda.** No es un hueco:
+  son dos universos.
+
+**Cómo tratarlos (propuesto, sin implementar):**
+
+1. `fecha_recibo` → opcional en el spec, **más** acotar la vigencia en
+   `derivar_orden_proveedor` con una constante configurable arriba del módulo
+   (como `CEDIS_AUSENCIA_ES_CERO`). **Falta decidir la ventana** — ¿lead time
+   del SKU, o fijo de 30-45 días? Es criterio de negocio.
+2. Partir la advertencia de citas huérfanas en sus dos poblaciones: las 49,200
+   de proveedores fuera de alcance se filtran al leer y se reportan como nota;
+   las **12,902 de proveedores que sí están en COMPRAS** (P&G, Colgate,
+   Danone) son hueco real y **eso** es lo que hay que pedirle a Compras.
+   Pedir 12,902 con folio y fecha es una petición concreta; pedir 62 mil, no.
+3. Quitar `fecha_pedido` del layout de CITAS: es derivable por join y hoy sólo
+   genera 62 mil `#N/A`.
+
+**Pendiente para la siguiente sesión:**
+
+- Decidir la ventana de vigencia y aplicar los tres puntos de arriba.
+- **Endpoint `/api/analisis/{id}/sku/{sku}`** para ver el día a día de un SKU
+  desde el front. Hoy la respuesta sólo trae `por_sku_tienda` (un renglón
+  agregado) y la historia diaria vive únicamente en el Excel. Ojo con el caso
+  del SKU sano: el pipeline descarta los días sin faltante desde el principio
+  (`llaves_con_faltante`), así que enseñar "estaba sano" con su inventario
+  diario obliga a retener también esos días — decisión de diseño con costo en
+  memoria, no está tomada.
+- Sigue sin CI en `orc-api` (`superfly/flyctl-actions`).
+
+---
+
 ## Sesión 2026-08-09 — corrida con el V5 reentregado
 
 Llegó una reentrega del layout V5 (el Excel pasó de 35 MB a 64 MB). **La
