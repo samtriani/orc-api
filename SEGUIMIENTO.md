@@ -74,12 +74,17 @@ la primera a construir.
    por omisión **no** toca `sucursales`/`catalogo_sku_tienda` (tienen
    ciclo de vida propio) — `--con-catalogos` los incluye si hace falta.
 
+**`orc-api` desplegado y verificado en producción** (mismo día):
+`/api/expediente`, `/api/tiendas` y `/api/analizar-tienda` dan en
+`https://orc-api.fly.dev` exactamente los mismos números que en local
+(43 días, 42 con causa, para el SKU de prueba). El front (`orc-gui`)
+**sigue sin subirse a Vercel** — el push a `main` ya activaría el deploy
+automático, sólo falta confirmarlo/probarlo ahí.
+
 **Pendiente para la siguiente sesión:**
 
-- **No desplegado.** Esto quedó probado en local (API + Neon + front por
-  proxy), pero no se corrió `flyctl deploy` ni se subió a Vercel — falta
-  hacerlo y volver a probar en producción, como se hizo con la fase
-  anterior.
+- Confirmar que Vercel desplegó `orc-gui` solo con el push a `main` y
+  probar la gráfica ahí.
 - Falta ver esto en un navegador real (sin herramienta de screenshot en
   este entorno, sólo se verificó por API/build) — revisar que la gráfica
   se vea bien, que el scroll horizontal funcione con periodos largos, y que
