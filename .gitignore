@@ -1,6 +1,9 @@
 __pycache__/
 *.pyc
 
+# Credenciales locales (connection strings, tokens). Nunca se sube.
+.env
+
 # El front vive en su propio repo: samtriani/orc-gui
 web/
 
