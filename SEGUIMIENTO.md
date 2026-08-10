@@ -24,6 +24,73 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-10 (continuación 2) — detalle diario por SKU (expediente)
+
+El cliente vendió un dashboard ejecutivo de OSA (bocetos compartidos por el
+usuario) que incluye una vista "Evolución Diaria" por SKU. De las piezas que
+faltaban para esa historia, ésta era la única que ya se podía construir con
+los datos que hay hoy (las otras — tendencia de 6 meses, comparación entre
+tiendas — necesitan datos que todavía no llegan). El usuario la eligió como
+la primera a construir.
+
+**Se hizo:**
+
+1. **`orcmm_fuentes_db.leer_fuentes_db` gana un parámetro `sku` opcional.**
+   Con él, todas las consultas se acotan también por SKU, y
+   `TABLEAU_INV_TIENDA`/`TABLEAU_VENTAS` cambian de estrategia: en vez del
+   filtro "sólo días con faltante" (necesario para una tienda completa),
+   traen TODOS los días del rango — un solo SKU es volumen mínimo, y el
+   detalle diario necesita también los días sanos.
+2. **`orcmm_expediente_db.py`** (nuevo) — arma el JSON día por día
+   reutilizando las MISMAS funciones que ya usa el motor para clasificar
+   (`derivar_transito_vigente`, `derivar_envio_generado`,
+   `derivar_pedido_tienda`, `derivar_orden_proveedor`, todas de
+   `orcmm_pipeline.py`) — así la gráfica explica exactamente lo que dice el
+   veredicto, no una aproximación aparte. Es el hermano JSON/Postgres de
+   `orcmm_expediente.py` (CLI, Excel/CSV, consola) — no se tocó ese archivo.
+3. **`GET /api/expediente?tienda=&sku=&desde=&hasta=&umbral_osa=`** — sin
+   cola (`run_in_threadpool`, igual que `/api/tiendas`): un solo SKU
+   responde en ~2s, no hace falta poll.
+4. **Verificado contra datos reales**: comparé el conteo de días con causa
+   raíz del expediente de un SKU contra su fila en `por_sku_tienda` de un
+   análisis completo de la misma tienda/periodo — coincide exacto (42 días
+   con faltante, 42 clasificados, RC01 en los dos caminos).
+5. **Front**: botón "Evolución diaria" en la tabla "Por SKU-Tienda" (sólo en
+   modo "tienda" — un resultado por archivo puede traer un SKU que ni
+   siquiera esté en Postgres). Gráfica nueva sin librería (mismo criterio
+   que el waterfall ya existente: barras vía `[style.height]` escaladas
+   contra el máximo local de cada métrica), con la tira de causa raíz por
+   día reutilizando la paleta `COLOR_CAUSA` ya existente — nada de colores
+   nuevos.
+6. `angular.json`: subido el presupuesto de CSS por componente de 8kB a
+   12kB — `app.css` ya lo rebasaba por la acumulación legítima de esta
+   sesión (marca, selector de tienda, ahora esta gráfica); el techo de
+   error sigue en 16kB.
+7. **Entre medio**: llegó una entrega V6 (`OneDrive_1_8-10-2026_v6/`),
+   misma tienda/periodo que la V5, conteos idénticos — se recargó con
+   `orcmm_etl_carga.py` (esta vez sin necesitar `--forzar`: V6 ya trae
+   `fecha_recibo` sin el hueco que documentaba la sesión anterior). Antes
+   de recargar se vació la base con `orcmm_db_borrar.py --si`, que ahora
+   por omisión **no** toca `sucursales`/`catalogo_sku_tienda` (tienen
+   ciclo de vida propio) — `--con-catalogos` los incluye si hace falta.
+
+**Pendiente para la siguiente sesión:**
+
+- **No desplegado.** Esto quedó probado en local (API + Neon + front por
+  proxy), pero no se corrió `flyctl deploy` ni se subió a Vercel — falta
+  hacerlo y volver a probar en producción, como se hizo con la fase
+  anterior.
+- Falta ver esto en un navegador real (sin herramienta de screenshot en
+  este entorno, sólo se verificó por API/build) — revisar que la gráfica
+  se vea bien, que el scroll horizontal funcione con periodos largos, y que
+  las marcas PT/CD/PV se entiendan sin la leyenda a la mano.
+- De las piezas que le faltan a la historia completa del dashboard
+  (bocetos del cliente): sigue pendiente la tendencia de 6 meses (necesita
+  más historial cargado) y la comparación entre tiendas (necesita las
+  otras 4 tiendas con datos operativos, no sólo su catálogo de SKU).
+
+---
+
 ## Sesión 2026-08-10 (continuación) — analizar directo desde Postgres
 
 Fase 2 de la entrada de abajo: el motor de clasificación ya puede correr

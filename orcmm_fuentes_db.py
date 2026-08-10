@@ -40,7 +40,14 @@ def _registrar(fu: Fuentes, hoja: str, filas: list, campos_fecha) -> None:
 
 
 def leer_fuentes_db(tienda: str, desde: date, hasta: date,
-                     umbral_osa: float = 100.0, dsn: Optional[str] = None) -> Fuentes:
+                     umbral_osa: float = 100.0, dsn: Optional[str] = None,
+                     sku: Optional[str] = None) -> Fuentes:
+    """Con `sku`, todas las consultas se acotan a ese SKU además de la
+    tienda — lo usa orcmm_expediente_db para el detalle diario de un solo
+    producto. Con un solo SKU el volumen es mínimo, así que
+    TABLEAU_INV_TIENDA/TABLEAU_VENTAS traen TODOS los días del rango (no
+    sólo los de faltante): el detalle diario necesita también los días
+    sanos, a diferencia del análisis de la tienda completa."""
     fu = Fuentes()
     desde_eventos = desde - timedelta(days=LOOKBACK_EVENTOS_DIAS)
 
@@ -49,12 +56,21 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
         with conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             # CEDIS que surte a la tienda. cedis_inventario, compras_pedidos_prov
             # y citas_prov_cedis están scoped por cedis, no por tienda.
-            cur.execute("SELECT DISTINCT cedis_surtidor FROM catalogo WHERE tienda = %s",
-                        (tienda,))
+            sql = "SELECT DISTINCT cedis_surtidor FROM catalogo WHERE tienda = %s"
+            params = [tienda]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
             cedis_ids = [r["cedis_surtidor"] for r in cur.fetchall() if r["cedis_surtidor"]]
 
             # 1. CATALOGO — estático, sin fecha.
-            cur.execute("SELECT * FROM catalogo WHERE tienda = %s", (tienda,))
+            sql = "SELECT * FROM catalogo WHERE tienda = %s"
+            params = [tienda]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
             filas = cur.fetchall()
             for f in filas:
                 fu.catalogo[(_texto(f["sku"]), _texto(f["tienda"]))] = f
@@ -64,10 +80,13 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             # 2. BOPS_OSA — define qué días entran al análisis. Se lee ANTES
             #    de inv_tienda/ventas a propósito: de aquí sale la lista de
             #    (sku, fecha) con faltante real, que es lo único que hace
-            #    falta pedirle a esas dos tablas (ver punto 3).
-            cur.execute("SELECT * FROM bops_osa "
-                        "WHERE tienda = %s AND fecha BETWEEN %s AND %s",
-                        (tienda, desde, hasta))
+            #    falta pedirle a esas dos tablas cuando no hay `sku` (ver 3).
+            sql = "SELECT * FROM bops_osa WHERE tienda = %s AND fecha BETWEEN %s AND %s"
+            params = [tienda, desde, hasta]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
             filas = cur.fetchall()
             for f in filas:
                 fu.osa[(_texto(f["sku"]), _texto(f["tienda"]), f["fecha"])] = f
@@ -80,34 +99,49 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                     skus_faltante.append(f["sku"])
                     fechas_faltante.append(f["fecha"])
 
-            # 3. TABLEAU_INV_TIENDA / TABLEAU_VENTAS — mismo criterio que el
-            #    flujo de CSV (orcmm_fuentes_csv.llaves_con_faltante): traer
-            #    sólo los (sku, fecha) que BOPS_OSA ya marcó con faltante, no
-            #    el inventario/venta de TODOS los días de TODOS los SKU. Sin
-            #    esto se trae prácticamente la tabla entera — medido: 2.66M
-            #    de 2.72M filas, 97 de 119s de una corrida completa.
-            filas = []
-            if skus_faltante:
-                cur.execute(
-                    "SELECT t.* FROM tableau_inv_tienda t "
-                    "JOIN unnest(%s::text[], %s::date[]) AS k(sku, fecha) "
-                    "  ON t.sku = k.sku AND t.fecha = k.fecha "
-                    "WHERE t.tienda = %s",
-                    (skus_faltante, fechas_faltante, tienda))
+            # 3. TABLEAU_INV_TIENDA / TABLEAU_VENTAS.
+            if sku:
+                # Un solo SKU: volumen mínimo, se trae el rango completo
+                # (también los días sanos, que el detalle diario necesita).
+                cur.execute("SELECT * FROM tableau_inv_tienda "
+                            "WHERE tienda = %s AND sku = %s AND fecha BETWEEN %s AND %s",
+                            (tienda, sku, desde, hasta))
                 filas = cur.fetchall()
+            else:
+                # Tienda completa: mismo criterio que el flujo de CSV
+                # (orcmm_fuentes_csv.llaves_con_faltante) — traer sólo los
+                # (sku, fecha) que BOPS_OSA ya marcó con faltante, no el
+                # inventario/venta de TODOS los días de TODOS los SKU. Sin
+                # esto se trae prácticamente la tabla entera — medido:
+                # 2.66M de 2.72M filas, 97 de 119s de una corrida completa.
+                filas = []
+                if skus_faltante:
+                    cur.execute(
+                        "SELECT t.* FROM tableau_inv_tienda t "
+                        "JOIN unnest(%s::text[], %s::date[]) AS k(sku, fecha) "
+                        "  ON t.sku = k.sku AND t.fecha = k.fecha "
+                        "WHERE t.tienda = %s",
+                        (skus_faltante, fechas_faltante, tienda))
+                    filas = cur.fetchall()
             for f in filas:
                 fu.inv_tienda[(_texto(f["sku"]), _texto(f["tienda"]), f["fecha"])] = f
             _registrar(fu, "TABLEAU_INV_TIENDA", filas, "fecha")
 
-            filas = []
-            if skus_faltante:
-                cur.execute(
-                    "SELECT t.* FROM tableau_ventas t "
-                    "JOIN unnest(%s::text[], %s::date[]) AS k(sku, fecha) "
-                    "  ON t.sku = k.sku AND t.fecha = k.fecha "
-                    "WHERE t.tienda = %s",
-                    (skus_faltante, fechas_faltante, tienda))
+            if sku:
+                cur.execute("SELECT * FROM tableau_ventas "
+                            "WHERE tienda = %s AND sku = %s AND fecha BETWEEN %s AND %s",
+                            (tienda, sku, desde, hasta))
                 filas = cur.fetchall()
+            else:
+                filas = []
+                if skus_faltante:
+                    cur.execute(
+                        "SELECT t.* FROM tableau_ventas t "
+                        "JOIN unnest(%s::text[], %s::date[]) AS k(sku, fecha) "
+                        "  ON t.sku = k.sku AND t.fecha = k.fecha "
+                        "WHERE t.tienda = %s",
+                        (skus_faltante, fechas_faltante, tienda))
+                    filas = cur.fetchall()
             for f in filas:
                 fu.ventas[(_texto(f["sku"]), _texto(f["tienda"]), f["fecha"])] = f
             _registrar(fu, "TABLEAU_VENTAS", filas, "fecha")
@@ -115,9 +149,12 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             # 5. CEDIS_INVENTARIO — scoped por cedis, no por tienda.
             filas = []
             if cedis_ids:
-                cur.execute("SELECT * FROM cedis_inventario "
-                            "WHERE cedis = ANY(%s) AND fecha BETWEEN %s AND %s",
-                            (cedis_ids, desde, hasta))
+                sql = "SELECT * FROM cedis_inventario WHERE cedis = ANY(%s) AND fecha BETWEEN %s AND %s"
+                params = [cedis_ids, desde, hasta]
+                if sku:
+                    sql += " AND sku = %s"
+                    params.append(sku)
+                cur.execute(sql, params)
                 filas = cur.fetchall()
             for f in filas:
                 fu.inv_cedis[(_texto(f["sku"]), _texto(f["cedis"]), f["fecha"])] = f
@@ -126,17 +163,25 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                 fu.dias_cedis.setdefault(cedis, set()).add(d)
 
             # 6. CEDIS_TRANSFERENCIAS — tienda_destino directo, con lookback.
-            cur.execute("SELECT * FROM cedis_transferencias "
-                        "WHERE tienda_destino = %s AND fecha_generacion BETWEEN %s AND %s",
-                        (tienda, desde_eventos, hasta))
+            sql = ("SELECT * FROM cedis_transferencias "
+                   "WHERE tienda_destino = %s AND fecha_generacion BETWEEN %s AND %s")
+            params = [tienda, desde_eventos, hasta]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
             fu.transferencias = cur.fetchall()
             _registrar(fu, "CEDIS_TRANSFERENCIAS", fu.transferencias,
                        ["fecha_generacion", "fecha_salida_cedis", "fecha_recepcion_tienda"])
 
             # 7. SIMA_PEDIDOS_TIENDA — tienda directo, con lookback (0 filas hoy).
-            cur.execute("SELECT * FROM sima_pedidos_tienda "
-                        "WHERE tienda = %s AND fecha_pedido BETWEEN %s AND %s",
-                        (tienda, desde_eventos, hasta))
+            sql = ("SELECT * FROM sima_pedidos_tienda "
+                   "WHERE tienda = %s AND fecha_pedido BETWEEN %s AND %s")
+            params = [tienda, desde_eventos, hasta]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
             fu.pedidos_tienda = cur.fetchall()
             _registrar(fu, "SIMA_PEDIDOS_TIENDA", fu.pedidos_tienda,
                        ["fecha_pedido", "fecha_surtido"])
@@ -144,9 +189,13 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             # 8. COMPRAS_PEDIDOS_PROV — cedis_destino, no tienda, con lookback.
             fu.pedidos_prov = []
             if cedis_ids:
-                cur.execute("SELECT * FROM compras_pedidos_prov "
-                            "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
-                            (cedis_ids, desde_eventos, hasta))
+                sql = ("SELECT * FROM compras_pedidos_prov "
+                       "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s")
+                params = [cedis_ids, desde_eventos, hasta]
+                if sku:
+                    sql += " AND sku = %s"
+                    params.append(sku)
+                cur.execute(sql, params)
                 fu.pedidos_prov = cur.fetchall()
             _registrar(fu, "COMPRAS_PEDIDOS_PROV", fu.pedidos_prov,
                        ["fecha_pedido", "fecha_recibo"])
@@ -154,9 +203,13 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             # 9. CITAS_PROV_CEDIS — cedis_destino, no tienda, con lookback.
             fu.citas_prov = []
             if cedis_ids:
-                cur.execute("SELECT * FROM citas_prov_cedis "
-                            "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
-                            (cedis_ids, desde_eventos, hasta))
+                sql = ("SELECT * FROM citas_prov_cedis "
+                       "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s")
+                params = [cedis_ids, desde_eventos, hasta]
+                if sku:
+                    sql += " AND sku = %s"
+                    params.append(sku)
+                cur.execute(sql, params)
                 fu.citas_prov = cur.fetchall()
             _registrar(fu, "CITAS_PROV_CEDIS", fu.citas_prov, ["fecha_pedido", "fecha_cita"])
     finally:

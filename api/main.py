@@ -54,6 +54,7 @@ load_dotenv()
 
 from api.servicio import analizar, diagnosticar_layout               # noqa: E402
 from orcmm_db import conectar                                        # noqa: E402
+from orcmm_expediente_db import expediente_sku                       # noqa: E402
 from orcmm_fuentes_csv import hoja_de_archivo                        # noqa: E402
 from orcmm_fuentes_db import leer_fuentes_db                         # noqa: E402
 
@@ -445,6 +446,18 @@ async def tiendas() -> dict:
     except Exception as e:
         raise HTTPException(503, f"No se pudo leer la base de datos: {e}")
     return {"tiendas": filas}
+
+
+@app.get("/api/expediente")
+async def expediente(tienda: str, sku: str, desde: date, hasta: date,
+                      umbral_osa: float = Query(100.0, gt=0, le=100)) -> dict:
+    """Detalle diario de un SKU en una tienda: inventario, venta, pedidos y
+    la causa raíz de cada día con faltante. A diferencia de /api/analizar*,
+    no hace falta cola: un solo SKU es una consulta rápida."""
+    try:
+        return await run_in_threadpool(expediente_sku, tienda, sku, desde, hasta, umbral_osa)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo leer el expediente: {e}")
 
 
 @app.post("/api/analizar", status_code=202)
