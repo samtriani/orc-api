@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import textwrap
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -75,8 +75,27 @@ WRAP = Alignment(wrap_text=True, vertical="top")
 CEDIS_AUSENCIA_ES_CERO = True
 
 
-def _fecha(v) -> Optional[date]:
+# Errores de Excel que llegan como texto en la celda. Aparecen cuando el layout
+# trae columnas calculadas con fórmula en vez de dato: si la fórmula no resuelve
+# —XLOOKUP guardado como `_xlfn.XLOOKUP` en un Excel que no la reconoce, un
+# folio que no existe en la hoja destino— lo que se guarda en caché es el error.
+# Se leen como dato ausente, no como valor: un `#N/A` significa que no se supo,
+# igual que una celda vacía. Se cuentan al leer para que salga en advertencias.
+ERRORES_EXCEL = frozenset({
+    "#N/A", "#VALUE!", "#REF!", "#DIV/0!", "#NUM!",
+    "#NAME?", "#NULL!", "#SPILL!", "#CALC!", "#GETTING_DATA",
+})
+
+
+def _es_vacio(v) -> bool:
+    """Nada, cadena vacía o un error de Excel: los tres son dato ausente."""
     if v is None or v == "":
+        return True
+    return isinstance(v, str) and v.strip().upper() in ERRORES_EXCEL
+
+
+def _fecha(v) -> Optional[date]:
+    if _es_vacio(v):
         return None
     if isinstance(v, datetime):
         return v.date()
@@ -86,20 +105,20 @@ def _fecha(v) -> Optional[date]:
 
 
 def _texto(v) -> Optional[str]:
-    if v is None:
+    if _es_vacio(v):
         return None
     s = str(v).strip()
     return s or None
 
 
 def _entero(v) -> Optional[int]:
-    if v is None or v == "":
+    if _es_vacio(v):
         return None
     return int(float(v))
 
 
 def _decimal(v) -> Optional[float]:
-    if v is None or v == "":
+    if _es_vacio(v):
         return None
     return float(v)
 
@@ -354,6 +373,17 @@ def leer_fuentes(paquete, umbral_osa: float = 100.0) -> Fuentes:
         fechas = [_fecha(f.get(c)) for f in filas for c in campos_fecha]
         fechas = [x for x in fechas if x]
         fu.rango[hoja] = (min(fechas), max(fechas)) if fechas else (None, None)
+
+        # Un error de Excel se lee como dato ausente, pero no es lo mismo que un
+        # hueco: significa que la columna viene calculada con fórmula y falló.
+        # Se avisa por columna para que se pueda pedir el dato en duro.
+        errores = Counter(col for f in filas for col, v in f.items()
+                          if isinstance(v, str) and v.strip().upper() in ERRORES_EXCEL)
+        for col, n in errores.most_common():
+            adv.append(f"{hoja}: la columna '{col}' trae {n:,} celdas con error de "
+                       f"Excel (#N/A y similares) — viene calculada con fórmula, "
+                       f"no con dato. Se leyeron como vacías.")
+
         if not filas:
             adv.append(f"{hoja}: hoja VACÍA — " + (
                 nota_si_vacia or "todas las reglas que dependen de ella "

@@ -17,6 +17,85 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-09 — corrida con el V5 reentregado
+
+Llegó una reentrega del layout V5 (el Excel pasó de 35 MB a 64 MB). **La
+conclusión es que no aportó nada al análisis**, y vale la pena dejar escrito
+por qué, para no volver a pedir lo mismo.
+
+**Se hizo:**
+
+1. **Fix de lectura — errores de Excel.** El pipeline reventaba con
+   `ValueError: Invalid isoformat string: '#N/A'`. La columna `fecha_pedido`
+   de `CITAS_PROV_CEDIS` no viene como dato: viene con la fórmula
+   `=IFERROR(_xlfn.XLOOKUP(...))`, y el prefijo `_xlfn.` significa que Excel
+   la guardó como función desconocida, así que nunca resolvió y dejó el error
+   en caché. Se agregó `ERRORES_EXCEL` + `_es_vacio()`, y los cuatro
+   convertidores (`_fecha`, `_texto`, `_entero`, `_decimal`) los leen como
+   dato ausente. Ojo con `_texto`: antes habría metido `"#N/A"` como si fuera
+   un folio válido. `registrar()` ahora cuenta las celdas con error y las
+   reporta por columna — en esta corrida salieron **62,102** en `fecha_pedido`.
+2. **Corrida completa** con los 7 CSV de Tableau. OSA del periodo **85.9%**,
+   5,192 de 5,201 días clasificados (99.8%), venta perdida clasificada al
+   99.9%. Pareto: **94.1% Ejecución en Tienda** · 5.3% Proveedor · 0.3%
+   Compras · 0.1% Transporte · 0.1% CEDIS · 0.1% sin clasificar. El titular
+   **no se movió** respecto de la corrida anterior.
+
+**Lo que se midió de la reentrega (para no volver a pedirla igual):**
+
+- `COMPRAS_PEDIDOS_PROV` creció de 151,138 a **853,073** filas, pero la
+  ventana va de **2025-05-07 a 2026-06-25**: sólo el **16.4%** (140,122
+  filas) cae dentro de feb-mar 2026. 60.3% es histórico anterior y 23.3% es
+  posterior al cierre, hasta junio. Las ~700 K filas nuevas están **todas**
+  fuera del periodo. Por eso los huérfanos de citas apenas bajaron de 62.0%
+  a 60.9%.
+- `CEDIS_INVENTARIO` llegó **idéntica**: 23,349 filas, 1,553 ceros, 2,979
+  SKU, `piezas_reservadas` vacía en el 100%. Son ~602 SKU con serie contra
+  los 26,407 del catálogo (**2.2% de cobertura**), y sigue la ventana rota
+  del 8 al 14 de marzo, donde el panel se renueva casi por completo cada día
+  (del 7 al 8 de marzo sólo sobreviven 2 SKU).
+- `SIMA_PEDIDOS_TIENDA` sigue **vacía**.
+
+**Hallazgo: `cajas_confirmadas_cita` no sirve.** Es una copia exacta de
+`cajas_pedidas` en **38,858 de 38,858** pares (folio, sku) que cruzan — 100%,
+sin una sola excepción. Es justo lo que el propio layout pide avisar en la
+descripción de la columna. De ahí sale el `pct_confirmado` por encima de 100%
+(113.0% global, BONAFONT 187.7%, Cía. Vinícola del Norte 193.0%): cuando un
+pedido tiene varias citas, cada una carga el total del pedido y
+`_aplicar_citas` las suma. 775 pares con cita múltiple generan 162,520 cajas
+de exceso, y el hueco total sobre el 100% es de 154,769 — o sea, **ese 2% de
+pares explica el desvío completo**. `cajas_entregadas` en cambio **sí es dato
+real** (8.0% no se presentó, 5.9% parcial, nunca excede), así que
+`cumplimiento` y `efectivo` se sostienen y la prioridad 8 se salva.
+
+**Pendiente para la siguiente sesión:**
+
+- **No publicar `pct_confirmado`** mientras `cajas_confirmadas_cita` sea copia
+  del pedido. Decidir además si `_aplicar_citas` debe seguir sumando ese campo
+  entre citas vencidas — es cambio de criterio, quedó sin tocar a propósito.
+- **Pedir a Compras**: (a) `cajas_confirmadas_cita` con el compromiso real al
+  agendar; (b) `estatus_cita`, hoy **vacía en las 101,942 filas**, sin ella no
+  hay cómo descartar canceladas ni reprogramadas; (c) `fecha_pedido` en duro,
+  no calculada; (d) confirmar si la hoja trae TODAS las citas del periodo —
+  **809,169 de 848,027 pedidos (95.4%) no tienen cita** y el modelo los
+  dictamina RC06 "el proveedor nunca agendó". Con ese porcentaje, lo más
+  probable es que sea hueco de captura y no del proveedor.
+- **Pedir a CEDIS** la foto diaria sobre los 26,407 SKU del catálogo, no sobre
+  602, y aclarar qué pasó del 8 al 14 de marzo. Ojo con la premisa de
+  `CEDIS_AUSENCIA_ES_CERO`: dice que la extracción omite los SKU en cero, pero
+  el archivo trae 1,553 filas con `existencia_piezas = 0` — si de verdad los
+  omitiera, no debería haber ninguna. Conviene reconfirmarlo, porque de ese
+  supuesto depende que la rama CEDIS quede en 0.1% y el peso caiga en
+  proveedor.
+- **Revisar el 83% excluido**: de 30,565 días con faltante que entregó BOPS,
+  25,364 ($285,907) quedan fuera por `sku_fuera_del_catalogo_de_la_tienda`.
+  La venta perdida excluida casi duplica la analizada ($155,959).
+- Sigue pendiente de la sesión anterior: **desplegar `orc-api`** (el deploy en
+  Fly.io está atrás del layout V5) y **armar el CI** con
+  `superfly/flyctl-actions`.
+
+---
+
 ## Sesión 2026-08-06 (noche) — layout V5: Excel + CSV
 
 El layout dejó de caber en un solo Excel. `TABLEAU_INV_TIENDA` (2.7 millones
