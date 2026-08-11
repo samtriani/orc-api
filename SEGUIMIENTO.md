@@ -5,6 +5,11 @@ memoria entre sesiones: **al empezar, léelo**; **al cerrar, agrega una
 entrada nueva arriba** con qué cambió y qué quedó pendiente. No se borran
 las entradas viejas — así queda el historial de decisiones.
 
+> **Regla nueva de esta sesión**: antes de comitear/subir cualquier cambio,
+> avisar primero qué se va a subir (archivos + resumen) y esperar luz
+> verde — aunque el trabajo ya venga pedido. El usuario lo pidió explícito
+> porque pedir "haz X" no es lo mismo que autorizar subirlo a git.
+
 ## Cómo está repartido el proyecto
 
 - **`orc-api`** (este repo) — motor de clasificación (`orcmm_rca_engine.py`),
@@ -21,6 +26,52 @@ las entradas viejas — así queda el historial de decisiones.
   front Angular. Desplegado en Vercel: https://orc-gui.vercel.app — hace
   *rewrite* server-side de `/api/*` hacia Fly.io, así que no hay CORS de por
   medio entre el navegador y el back.
+
+---
+
+## Sesión 2026-08-11 — moneda, filtros con varios valores, y qué falta por conectar
+
+Sesión corta de ajustes al front, sobre lo que dejó la sesión anterior
+(cola/cancelación, split de `/resumen`, identidad de marca).
+
+**Se hizo:**
+
+1. **Venta perdida con `$`** en las 7 tarjetas/tablas donde aparece
+   (portada, ficha de SKU, waterfall, Pareto, subcausas, bloqueos, detalle
+   por SKU-tienda). Prefijo literal en la plantilla, no `CurrencyPipe` —
+   más simple y sin depender de datos de locale que no están registrados.
+2. **Filtros de SKU y proveedor aceptan varios valores a la vez** (fichas
+   removibles, "cualquiera de estos"), con autocompletar nativo
+   (`<datalist>`, sin librería nueva) sugiriendo de lo que ya trae el
+   resultado. Sigue aceptando texto libre que no esté en la lista.
+3. **El filtro de SKU ahora busca por nombre además de por código.** El
+   backend no mandaba el nombre en `por_sku_tienda` — se agregó
+   `descripcion` (de `CATALOGO`, ya estaba en memoria, cero consultas
+   nuevas). Las sugerencias del datalist muestran "código — nombre"; al
+   elegir una (o Enter) la ficha se queda sólo con el código.
+   → orc-api `0d2c0a5`, desplegado y verificado en producción.
+4. **"SKU que más costaron" (portada) ahora sí reacciona a los filtros**
+   — antes leía la lista cruda del backend, ignorando lo que estuviera
+   filtrado. Sin riesgo: cada renglón ya trae su propia venta_perdida, no
+   había nada que recalcular mal.
+
+**Pendiente — decisión para esta noche, en la otra máquina:**
+
+- **El waterfall ("Causas raíz de faltantes") y el Pareto por
+  causa/responsable siguen SIN reaccionar a los filtros**, y a propósito
+  no se tocaron hoy. Se verificó que no se pueden recalcular en el
+  navegador desde `por_sku_tienda`: esa tabla sólo trae **la causa
+  dominante por SKU** (la que ganó en sus días), no el detalle día por
+  día. Un SKU con RC01 unos días y RC06 otros se ve como "100% RC01" en
+  esa tabla — recalcular el Pareto desde ahí daría números
+  **equivocados**, no sólo desactualizados.
+  Arreglarlo bien exige que el backend mande el detalle diario al front,
+  y eso choca de frente con el trabajo de la sesión anterior de
+  **aligerar** esa misma respuesta (se partió en `/resumen` porque pesaba
+  1.5MB y tardaba 17-30s por el proxy de Vercel). Hay que decidir el
+  trade-off a propósito — mandar el detalle sólo para el periodo/tienda
+  ya analizado, paginarlo, un endpoint aparte bajo demanda, etc. — no
+  sumarlo sin más.
 
 ---
 
