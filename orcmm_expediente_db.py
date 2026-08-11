@@ -22,6 +22,25 @@ from orcmm_pipeline import (OrdenProveedor, _osa_pct, derivar_envio_generado,
 from orcmm_rca_periodo import clasificar
 
 
+def _vendidas(venta_row: dict):
+    """Piezas vendidas del día.
+
+    El export de Tableau manda la columna de la métrica SIN ENCABEZADO, y el
+    mapeo de `orcmm_fuentes_csv` la aterriza en `importe_venta` — un nombre
+    que no corresponde: los valores son piezas, no pesos (3.00 de un papel
+    higiénico de 18 rollos son tres paquetes, no tres pesos). En la carga real
+    son 254,986 filas con `importe_venta` y CERO con `unidades_vendidas`, así
+    que leer sólo la columna "correcta" deja la serie permanentemente vacía.
+
+    Se prefiere `unidades_vendidas` para el día que el export sí la traiga, y
+    mientras tanto se cae a donde el dato realmente está. El arreglo de fondo
+    —renombrar el mapeo— obliga a recargar las 254,986 filas y a tocar el
+    spec, porque hoy `importe_venta` está marcada obligatoria.
+    """
+    v = venta_row.get("unidades_vendidas")
+    return v if v is not None else venta_row.get("importe_venta")
+
+
 def expediente_sku(tienda: str, sku: str, desde: date, hasta: date,
                     umbral_osa: float = 100.0, dsn: Optional[str] = None) -> dict:
     fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa, dsn, sku=sku)
@@ -46,7 +65,7 @@ def expediente_sku(tienda: str, sku: str, desde: date, hasta: date,
             "fecha": fecha.isoformat(),
             "osa_pct": _osa_pct(osa_row.get("osa_pct")),
             "existencia_tienda": inv_row.get("existencia_piezas"),
-            "unidades_vendidas": venta_row.get("unidades_vendidas"),
+            "unidades_vendidas": _vendidas(venta_row),
             "existencia_cedis": cedis_row.get("existencia_piezas"),
             "pedido_tienda_abierto": derivar_pedido_tienda(fu, sku, tienda, fecha),
             "transito_vigente": derivar_transito_vigente(fu, sku, tienda, fecha),
