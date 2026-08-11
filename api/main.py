@@ -33,7 +33,7 @@ import threading
 import time
 import uuid
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -83,7 +83,7 @@ app = FastAPI(title="ORCMM — Clasificación de desabasto por causa raíz",
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ORIGENES,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -106,10 +106,20 @@ class Trabajo:
     salida: Optional[Path] = None
     nombre_descarga: Optional[str] = None
     creado: float = field(default_factory=time.time)
+    # Cuándo el ejecutor le dio turno. Mientras sea None el trabajo está en
+    # cola, no corriendo: sin esta marca el contador de la pantalla sumaba la
+    # espera al tiempo de análisis y decía "llevo 193 s trabajando" cuando la
+    # verdad era "llevo 193 s formado".
+    iniciado: Optional[float] = None
+    futuro: Optional[Future] = None
+    cancelado: bool = False
 
 
 TRABAJOS: Dict[str, Trabajo] = {}
 CANDADO = threading.Lock()
+
+# Estados en los que el trabajo ya no va a cambiar solo.
+TERMINALES = ("ok", "bloqueado", "sin_datos", "error", "cancelado")
 
 
 def _limpiar_viejos() -> None:
@@ -119,6 +129,44 @@ def _limpiar_viejos() -> None:
                   if t.creado < corte and t.estado != "en_proceso"]
         for id_ in viejos:
             shutil.rmtree(TRABAJOS.pop(id_).carpeta, ignore_errors=True)
+
+
+def _activo() -> Optional[str]:
+    """El id del análisis en vuelo, si hay uno.
+
+    El ejecutor tiene un solo trabajador a propósito, así que encolar un
+    segundo análisis no lo hace ir más rápido: lo pone a esperar detrás del
+    primero mientras la pantalla cuenta segundos como si estuviera trabajando.
+    Es mejor decir que ya hay uno corriendo y ofrecer seguirlo.
+    """
+    with CANDADO:
+        for id_, t in TRABAJOS.items():
+            if t.estado == "en_proceso" and not t.cancelado:
+                return id_
+    return None
+
+
+def _rechazar_si_hay_activo() -> None:
+    id_ = _activo()
+    if id_ is None:
+        return
+    t = TRABAJOS[id_]
+    raise HTTPException(409, {
+        "mensaje": "Ya hay un análisis en curso. El servidor corre uno a la vez.",
+        "id_activo": id_,
+        "archivo": t.archivo,
+        "segundos": round(time.time() - (t.iniciado or t.creado), 1),
+    })
+
+
+def _tomar_turno(id_: str) -> bool:
+    """Marca el arranque real del trabajo. False si ya lo cancelaron mientras
+    esperaba en la cola, en cuyo caso no hay que analizar nada."""
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None or trabajo.cancelado:
+        return False
+    trabajo.iniciado = time.time()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +345,8 @@ def _correr(id_: str, paquete: Paquete, corregir: bool, forzar: bool,
     trabajo = TRABAJOS.get(id_)
     if trabajo is None:                       # lo limpiaron mientras esperaba turno
         return
+    if not _tomar_turno(id_):                 # lo cancelaron mientras hacia cola
+        return
     try:
         diagnostico = diagnosticar_layout(paquete.xlsx, trabajo.carpeta, paquete.csvs)
 
@@ -363,6 +413,8 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
     trabajo = TRABAJOS.get(id_)
     if trabajo is None:
         return
+    if not _tomar_turno(id_):                 # lo cancelaron mientras hacia cola
+        return
     try:
         fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa)
         trabajo.nombre_descarga = f"Resultado RCA - tienda {tienda}.xlsx"
@@ -403,14 +455,15 @@ async def analizar_tienda(cuerpo: SolicitudTienda) -> dict:
         raise HTTPException(400, "'hasta' no puede ser anterior a 'desde'.")
 
     _limpiar_viejos()
+    _rechazar_si_hay_activo()
     id_ = uuid.uuid4().hex
     carpeta = Path(tempfile.mkdtemp(prefix=f"orcmm_bd_{id_}_"))
     etiqueta = f"Tienda {cuerpo.tienda} · {cuerpo.desde} a {cuerpo.hasta}"
     with CANDADO:
         TRABAJOS[id_] = Trabajo(carpeta=carpeta, archivo=etiqueta)
 
-    EJECUTOR.submit(_correr_desde_bd, id_, cuerpo.tienda, cuerpo.desde, cuerpo.hasta,
-                     cuerpo.umbral_osa)
+    TRABAJOS[id_].futuro = EJECUTOR.submit(
+        _correr_desde_bd, id_, cuerpo.tienda, cuerpo.desde, cuerpo.hasta, cuerpo.umbral_osa)
     return {"id": id_, "archivo": etiqueta, "estado": "en_proceso",
             "seguir_en": f"/api/analizar/{id_}"}
 
@@ -481,8 +534,9 @@ async def analizar_archivo(
     Pareto— y el resultado se puede leer sabiendo eso. La validación viaja
     entera en la respuesta: se decide con los errores a la vista, no a ciegas.
     """
+    _rechazar_si_hay_activo()
     id_, paquete = await _recibir(archivos)
-    EJECUTOR.submit(_correr, id_, paquete, corregir, forzar, umbral_osa)
+    TRABAJOS[id_].futuro = EJECUTOR.submit(_correr, id_, paquete, corregir, forzar, umbral_osa)
     return {"id": id_, "archivo": paquete.nombre_original, "estado": "en_proceso",
             "seguir_en": f"/api/analizar/{id_}"}
 
@@ -513,8 +567,49 @@ def estado_analisis(id_: str) -> dict:
 
     cuerpo = {"id": id_, "archivo": trabajo.archivo, "estado": trabajo.estado}
     if trabajo.estado == "en_proceso":
-        cuerpo["segundos"] = round(time.time() - trabajo.creado, 1)
+        # 'en_cola' y 'corriendo' son cosas distintas y hay que decirlo: el
+        # contador de un trabajo formado no mide trabajo, mide espera.
+        en_cola = trabajo.iniciado is None
+        cuerpo["fase"] = "en_cola" if en_cola else "corriendo"
+        cuerpo["segundos"] = round(time.time() - (trabajo.iniciado or trabajo.creado), 1)
+        if en_cola:
+            cuerpo["delante"] = sum(
+                1 for t in TRABAJOS.values()
+                if t.estado == "en_proceso" and not t.cancelado and t.creado < trabajo.creado)
     return cuerpo
+
+
+@app.delete("/api/analizar/{id_}")
+def cancelar_analisis(id_: str) -> dict:
+    """Cancela un análisis.
+
+    Si todavía hacía cola, `Future.cancel()` lo saca antes de que arranque y el
+    turno queda libre de inmediato. Si ya está corriendo no se puede matar el
+    hilo sin arriesgar la máquina, así que se marca cancelado —el front deja de
+    esperarlo y su resultado se descarta— pero el trabajador sigue ocupado
+    hasta que esa corrida termine. Se dice tal cual en la respuesta para no
+    prometer algo que no pasa.
+    """
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None:
+        raise HTTPException(404, "Ese análisis ya no está disponible.")
+
+    if trabajo.estado in TERMINALES:
+        return {"id": id_, "estado": trabajo.estado, "libero_el_turno": True,
+                "detalle": "El análisis ya había terminado."}
+
+    trabajo.cancelado = True
+    trabajo.estado = "cancelado"
+    salio_de_la_cola = bool(trabajo.futuro and trabajo.futuro.cancel())
+
+    return {
+        "id": id_,
+        "estado": "cancelado",
+        "libero_el_turno": salio_de_la_cola,
+        "detalle": ("Se sacó de la cola antes de arrancar." if salio_de_la_cola else
+                    "Ya estaba corriendo: se descarta su resultado, pero el "
+                    "trabajador sigue ocupado hasta que esa corrida termine."),
+    }
 
 
 @app.get("/api/analizar/{id_}/resumen")
