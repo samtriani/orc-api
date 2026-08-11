@@ -24,6 +24,54 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-10 (continuación 3) — la serie de venta del expediente salía vacía
+
+Revisando el expediente ya desplegado se vio que **`unidades_vendidas` venía
+`None` en los 43 días de los dos SKU de prueba**, o sea que la barra de venta
+de la gráfica estaba permanentemente en blanco y `altoBarraDia` dividía contra
+un máximo de 0. No se había notado porque sólo se había verificado el conteo
+de días con causa raíz, que sí cuadraba.
+
+**Consultado directo a Neon** (`flyctl ssh console`, la máquina ya tiene el
+`DATABASE_URL`):
+
+```
+tableau_ventas    filas: 254,986
+  con importe_venta:    254,986   (100%)
+  con unidades_vendidas:      0   (0%)
+```
+
+La columna existe en `sql/schema.sql` y es nullable, pero **nunca se llena**:
+el export de Tableau manda la columna de la métrica **sin encabezado** y
+`orcmm_fuentes_csv.py:90` la aterriza en `importe_venta`. El nombre no
+corresponde — **los valores son piezas, no pesos**: 3.00 de un papel higiénico
+Petalo de 18 rollos son tres paquetes, no tres pesos. Confirmado con el
+usuario, que lee esa columna como unidades vendidas del día.
+
+**Se hizo:** `_vendidas()` en `orcmm_expediente_db.py` — prefiere
+`unidades_vendidas` para el día que el export sí la traiga, y mientras tanto
+cae a `importe_venta`, que es donde el dato realmente está. **El front no se
+tocó**: su etiqueta "Unidades vendidas" ya era la correcta. Un archivo,
+20 líneas, sin migración ni recarga — el dato ya viajaba desde Postgres
+(la consulta es `SELECT *`), sólo no se copiaba al JSON.
+
+Desplegado y verificado en producción (**v11**): el SKU sano pasó de 0 a
+**33 de 43 días con venta**, y se lee coherente — el inventario baja conforme
+se vende (23 → 21 → 21 → 20). Los 10 días sin dato son días sin registro de
+venta, no un error. El contraste con el vino sigue siendo el mismo:
+existencia congelada en 3.00 y **una sola fila de venta en todo el periodo**
+(31-mar, 0.00), lo que refuerza la sospecha de inventario fantasma.
+
+**Pendiente:** el arreglo de fondo es renombrar el mapeo en
+`orcmm_fuentes_csv.py:90` para que el dato aterrice en `unidades_vendidas`,
+pero eso obliga a **marcar `importe_venta` opcional en el spec** (hoy está
+como obligatoria, `orcmm_layout_spec.py:132`) y a **recargar las 254,986
+filas**. Hoy funciona con el fallback. Lo que hay que pedirle a Andrés es que
+el export **nombre la columna**; mientras llegue sin encabezado, cualquier
+mapeo es una suposición.
+
+---
+
 ## Sesión 2026-08-10 (continuación 2) — detalle diario por SKU (expediente)
 
 El cliente vendió un dashboard ejecutivo de OSA (bocetos compartidos por el
