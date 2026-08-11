@@ -489,15 +489,49 @@ async def analizar_archivo(
 
 @app.get("/api/analizar/{id_}")
 def estado_analisis(id_: str) -> dict:
-    """Estado del análisis y, cuando termina, el mismo resumen de siempre."""
+    """SÓLO el estado. Unos bytes, no el resumen.
+
+    Antes esto devolvía el resumen completo en cada vuelta del poll, y el
+    resumen del análisis real pesa ~1.5 MB: 496 filas de SKU-tienda, 829 de
+    proveedor y ~16,500 citas falladas. Preguntar "¿ya acabaste?" cada 3
+    segundos arrastraba ese megabyte y medio cada vez.
+
+    Peor: la respuesta tardaba 3.7 s directo y 17-30 s pasando por el proxy de
+    Vercel — siempre más que el intervalo del poll—, así que el front la
+    cancelaba en cada vuelta y la pantalla se quedaba girando para siempre con
+    el análisis ya terminado del otro lado.
+
+    El resumen se pide UNA vez, al final, en /api/analizar/{id}/resumen.
+    """
+    trabajo = TRABAJOS.get(id_)
+    if trabajo is None:
+        raise HTTPException(404, "Ese análisis ya no está disponible. Hay que volver "
+                                 "a subir el paquete.")
+
+    if trabajo.estado == "error":
+        raise HTTPException(422, trabajo.error or "El análisis falló.")
+
+    cuerpo = {"id": id_, "archivo": trabajo.archivo, "estado": trabajo.estado}
+    if trabajo.estado == "en_proceso":
+        cuerpo["segundos"] = round(time.time() - trabajo.creado, 1)
+    return cuerpo
+
+
+@app.get("/api/analizar/{id_}/resumen")
+def resumen_analisis(id_: str) -> dict:
+    """El resumen completo, una sola vez, cuando el análisis ya terminó.
+
+    Sirve a los tres estados terminales: 'ok' trae el análisis, 'bloqueado'
+    trae los errores de layout y 'sin_datos' el motivo. El front necesita el
+    cuerpo en los tres casos, no sólo en el bueno.
+    """
     trabajo = TRABAJOS.get(id_)
     if trabajo is None:
         raise HTTPException(404, "Ese análisis ya no está disponible. Hay que volver "
                                  "a subir el paquete.")
 
     if trabajo.estado == "en_proceso":
-        return {"id": id_, "archivo": trabajo.archivo, "estado": "en_proceso",
-                "segundos": round(time.time() - trabajo.creado, 1)}
+        raise HTTPException(409, "El análisis todavía está corriendo.")
 
     if trabajo.estado == "error":
         raise HTTPException(422, trabajo.error or "El análisis falló.")
