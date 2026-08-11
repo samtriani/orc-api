@@ -224,6 +224,9 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
     por_sku = [{
         "sku": d.sku,
         "tienda": d.tienda,
+        # Para poder buscar por nombre además de por código en el front —
+        # no se usa para clasificar, sólo se arrastra al output.
+        "descripcion": fu.catalogo.get((d.sku, d.tienda), {}).get("descripcion"),
         "dias_con_faltante": d.dias_con_faltante,
         "dias_clasificados": d.dias_clasificados,
         "cobertura_pct": d.cobertura_pct,
