@@ -29,6 +29,90 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-11 (noche) — filtros que sí llegan al Pareto, y la grafica arreglada
+
+**Se hizo:**
+
+1. **El waterfall y los dos Pareto ya reaccionan a los filtros** — era el
+   pendiente de la entrada de abajo. El backend manda `detalle_dias`
+   comprimido (causas en catálogo aparte, cada día con su índice y campos de
+   una letra): ~5,200 renglones en ~200 KB en vez de ~700 KB. Se pide una
+   sola vez con el resumen; el poll sigue en 85 bytes.
+   → orc-api `2cde26b` (Fly **v18**) · orc-gui `5351239`
+   - El denominador del waterfall se recompone con el universo de BOPS del
+     SKU/tienda filtrado, que va desglosado en la respuesta. Sin eso, filtrar
+     a un SKU dejaría los puntos de OSA sobre el universo de la tienda.
+   - **Filtrar por causa NO cambia el denominador**: el universo lo define
+     qué SKU estás mirando. Si se encogiera a los días de esa causa, siempre
+     daría 100%.
+   - Sin filtros se usan tal cual las listas del backend, para no reproducir
+     sus redondeos con otra aritmética.
+2. **Evolución diaria: las escalas estaban mal de raíz.** `maximoDia()`
+   escalaba cada serie contra su propio máximo — tres reglas en el mismo
+   dibujo, así que un inventario de 3 podía verse más alto que una venta de
+   15. Ahora tienda y venta comparten escala (mismo lugar, misma unidad) y
+   **CEDIS va en su propia fila**, porque medido sobre los datos reales es de
+   10 a 500 veces mayor (un SKU con 4,421 en tienda tiene 105,504 en CEDIS);
+   en la misma regla la venta quedaría en 0.18% de altura. Cada fila escribe
+   su máximo. → orc-gui `38d164d`
+3. **Colores de la tira de causa raíz**, que no se veían: los pasteles del
+   Excel en cuadros de 8 px sobre blanco. Ahora saturados y reasignados **por
+   frecuencia**, para que las dos que de verdad coinciden queden lo más
+   separadas posible: RC01 (94.1%) naranja contra RC06 (5.3%) azul miden
+   ΔE 34.8. **RC99 pasa a rojo oscuro `#a10c22`** —es una alarma, no una
+   causa— y no al rojo de siempre, que queda a ΔE 12.7 del naranja de RC01,
+   bajo el piso de 15. "Sin faltante" pasa a verde pálido: antes era el mismo
+   gris que RC99 y no se distinguían.
+   **La leyenda de causas del expediente es obligatoria, no decorativa**: con
+   siete causas ninguna combinación clarea la separación para daltonismo con
+   todos los pares. Si se quita, la gráfica queda mal.
+4. Autocompletar: **elegir una sugerencia con el mouse ya agrega la ficha.**
+   Sólo se agregaba con Enter, y el `<datalist>` dispara `input`, nunca
+   `keydown`. → orc-gui `a23c579`
+5. Los dos paneles de tendencia quedan **apagados tras
+   `MOSTRAR_PANELES_SIN_DATOS`** (orc-gui `2bdc0b6`). El maquetado sigue vivo;
+   volver a encenderlos es una línea cuando lleguen los meses.
+
+**Medido — la base NO es el cuello, y no hacen falta índices:**
+
+```
+compras_pedidos_prov WHERE cedis_destino='280'  →  Seq Scan · 1,469 ms · 848,027 filas
+citas_prov_cedis     WHERE cedis_destino='280'  →  Seq Scan ·    71 ms ·  37,625 filas
+```
+
+`ix_compras_cedis_destino` **ya existe**; Postgres elige Seq Scan a propósito
+porque las 848,027 filas comparten CEDIS y el filtro no descarta nada. Segundo
+y medio en total: los minutos de una corrida se van en **Python**, no en SQL.
+Si algún día hay que acelerar esto, es por ahí — empezando por medir
+`_es_vacio()`, que corre en cada campo de cada fila y sigue sin cronometrarse.
+
+**Pendiente para mañana — el scorecard de proveedor con filtros:**
+
+Se puede y NO sería mentir: cada pedido trae columna `sku` y el cruce con
+citas ya es por `(folio, sku)` (`orcmm_pipeline.py:911`). Haría falta mandar
+el desglose por **(proveedor, sku)** —los mismos ocho contadores de
+`desempeno_proveedores`— acotado a los 496 SKU con faltante, que son los
+únicos que ofrece el autocompletar: ~50 KB.
+
+Lo que NO se puede: filtrar por **causa raíz o responsable** (un pedido no
+tiene causa; nace de un día con faltante en anaquel, otro universo) ni por
+**tienda** (los pedidos van al CEDIS, columna `cedis_destino`).
+
+**Y hay que decidir algo antes de hacerlo**: hoy el scorecard mide al
+proveedor sobre TODOS sus pedidos a propósito —su docstring dice que un
+proveedor puede incumplir sin que se note en anaquel—. Filtrado por SKU pasa
+a responder otra pregunta, y el fill rate de portada seguiría siendo el
+global: quedarían dos números que no cuadran en la misma pantalla. La tabla
+tendría que **anunciar** que está recortada, para que nadie lea un 40% de un
+proveedor creyendo que es su desempeño general.
+
+**Otro pendiente:** el filtrado nuevo **no se verificó de punta a punta** —
+compila y la lógica está revisada, pero no se corrió un análisis completo para
+confirmar que `detalle_dias` llega bien. Si al mover un filtro el waterfall no
+se inmuta, ahí está la pista.
+
+---
+
 ## Sesión 2026-08-11 — moneda, filtros con varios valores, y qué falta por conectar
 
 Sesión corta de ajustes al front, sobre lo que dejó la sesión anterior
