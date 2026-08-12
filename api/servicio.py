@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import List, Optional
+from collections import defaultdict
+from typing import Dict, List, Optional
 
 RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
@@ -187,6 +188,55 @@ def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
     } for d in desempeno_proveedores(fu)]
 
 
+def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
+    """El detalle día por día, comprimido, para que el front pueda recalcular
+    el waterfall y los Pareto cuando el usuario filtra.
+
+    Sin esto no se puede: `por_sku_tienda` sólo trae la causa DOMINANTE de
+    cada SKU —la que ganó en sus días—, así que un SKU con RC01 unos días y
+    RC06 otros se ve como "100% RC01". Recalcular el Pareto desde ahí daría
+    números equivocados, no sólo desactualizados.
+
+    Va comprimido a propósito. En vez de repetir "Ejecución en Tienda" y
+    "Tienda" en cada uno de los ~5,200 renglones, las causas van en un
+    catálogo aparte y cada día guarda su índice. Quedan cuatro campos por
+    día con nombres de una letra: pesa ~200 KB en vez de ~700 KB.
+
+    `universo` es el denominador del waterfall —las filas de BOPS del
+    alcance, no sólo los días con faltante— y va desglosado por SKU-tienda
+    para que al filtrar se pueda recomponer el denominador correcto. Sin él,
+    filtrar a un SKU dejaría los puntos de OSA calculados sobre el universo
+    de la tienda entera, que es un número sin sentido.
+    """
+    catalogo = {llave: True for llave in fu.catalogo}
+    universo: Dict[tuple, int] = defaultdict(int)
+    for (sku, tienda, _) in fu.osa:
+        if (sku, tienda) in catalogo:
+            universo[(sku, tienda)] += 1
+
+    causas: List[dict] = []
+    indice: Dict[tuple, int] = {}
+    filas = []
+    for dg in en_alcance:
+        clave = (dg["root_cause_id"], dg["causa_raiz"], dg["responsable"])
+        if clave not in indice:
+            indice[clave] = len(causas)
+            causas.append({"root_cause_id": clave[0], "causa": clave[1],
+                           "responsable": clave[2]})
+        filas.append({
+            "s": dg["sku"],
+            "t": dg["tienda"],
+            "c": indice[clave],
+            "v": round(dg["venta_perdida"] or 0.0, 2),
+        })
+
+    return {
+        "causas": causas,
+        "dias": filas,
+        "universo": [{"s": s, "t": t, "n": n} for (s, t), n in universo.items()],
+    }
+
+
 def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
              csvs=None, fu: Optional[Fuentes] = None) -> dict:
     """Corre el pipeline completo y devuelve el resumen que ve la pantalla.
@@ -254,6 +304,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "por_responsable": resumen_por_responsable(en_alcance),
         "por_subcausa": resumen_por_subcausa(en_alcance),
         "por_sku_tienda": por_sku,
+        "detalle_dias": _detalle_dias(fu, en_alcance),
         "proveedores": _proveedores_a_dict(fu),
         "citas_falladas": [{
             **f, "fecha_cita": f["fecha_cita"].isoformat() if f["fecha_cita"] else None
