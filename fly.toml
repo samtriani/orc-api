@@ -54,7 +54,7 @@ primary_region = 'dfw'
 # La API corre un solo análisis a la vez (ThreadPoolExecutor de 1 worker en
 # api/main.py) justamente para que este pico no se multiplique.
 [[vm]]
-  size = 'shared-cpu-1x'
-  memory = '2gb'
+  size = 'shared-cpu-2x'
+  memory = '4gb'
   cpu_kind = 'shared'
-  cpus = 1
+  cpus = 2
