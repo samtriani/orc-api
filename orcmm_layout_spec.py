@@ -64,9 +64,14 @@ HOJAS = {
              "(prioridad 3) cuando SIMA confirma que no hubo pedido de tienda.", "Automático"),
             ("rol_frecuencia", TXT, False, "Rol por frecuencia (base F9).", "A"),
             ("linea_vs_io", LST, False, "Línea / In&Out. No se usa para clasificar; sirve para segmentar el Pareto.", "Línea"),
+            # Agregados en el V8. Informativos: ninguna regla los consume hoy.
+            # Duplican el proveedor que ya vive en COMPRAS_PEDIDOS_PROV / CITAS,
+            # pero en el catálogo permiten conocerlo sin depender de una orden abierta.
             ("estatus_activo", BOL, True, "SKU vigente en catálogo para esa tienda.", "Sí"),
             ("Nombre_Tienda", TXT, False, "Nombre comercial de la tienda. Sólo para leer el "
                                           "reporte; ninguna regla lo usa.", "LA COMER COYOACAN"),
+            ("proveedor_id", TXT, False, "Clave del proveedor principal del SKU.", "PRV-0442"),
+            ("proveedor_nombre", TXT, False, "Nombre del proveedor principal del SKU.", "Kimberly Clark"),
         ],
     },
 
@@ -110,7 +115,12 @@ HOJAS = {
              "Venta perdida del día en pesos. Vive aquí y no en TABLEAU_VENTAS porque "
              "es BOPS quien sabe cuántas horas estuvo vacío el anaquel.", "1408.00"),
             ("numero_rupturas", ENT, False, "Cuántas veces se agotó el anaquel ese día.", "2"),
+            # Agregados en el V8. Banderas 0/1 del sistema de alertas de BOPS.
+            # Hoy ninguna regla las usa; se guardan para poder medir después si la
+            # alerta se envió y se ejecutó (insumo futuro para RC01 Ejecución en Tienda).
             ("minutos_sin_producto", ENT, False, "Duración total del hueco en minutos.", "845"),
+            ("Alerta Enviada", ENT, False, "1 si el sistema envió alerta ese día, 0 si no.", "1"),
+            ("Alerta Ejecutada", ENT, False, "1 si la alerta se atendió en tienda, 0 si no.", "1"),
         ],
     },
 
@@ -217,6 +227,9 @@ HOJAS = {
             ("proveedor_id", TXT, True, "", "PRV-0442"),
             ("proveedor_nombre", TXT, False, "", "Kimberly Clark"),
             ("cedis_destino", TXT, True, "", "280"),
+            # Agregada en el V8. Tienda que originó el pedido a proveedor.
+            # Informativa por ahora (viene vacía); ninguna regla la consume.
+            ("Tienda_Destino", TXT, False, "Clave de la tienda destino del pedido.", "287"),
             ("fecha_pedido", FEC, True, "", "2026-03-02"),
             ("fecha_cita", FEC, False, "Cita de entrega agendada.", "2026-03-05"),
             ("fecha_recibo", FEC, True, "Recepción real en CEDIS. VACÍO si no se recibió.", "2026-03-11"),

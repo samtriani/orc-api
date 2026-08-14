@@ -16,9 +16,9 @@ Tres cosas que los archivos reales obligan a resolver aquí:
   - No son CSV de coma. Salen de Tableau en UTF-16 LE con BOM y separados
     por TAB. El encoding y el delimitador se detectan, no se asumen.
   - Los encabezados vienen con nombre de negocio ("Código de Barras" por
-    sku), y la columna de la métrica viene SIN ENCABEZADO. Se traducen con
-    la misma idea de ALIAS_ENCABEZADOS del spec, y la columna sin nombre se
-    resuelve por posición.
+    sku), y la columna de la métrica puede venir SIN ENCABEZADO. Se traducen
+    con la misma idea de ALIAS_ENCABEZADOS del spec, y la columna sin nombre
+    se resuelve por posición.
   - Las fechas vienen como texto y en dos idiomas: "February 16, 2026" en
     inventario, "1 de Marzo de 2026" en ventas.
 
@@ -68,7 +68,16 @@ ALIAS_CSV = {
         "tienda no.": "tienda",
         "day of fecha": "fecha",
         "dia en texto": "fecha",
+        # Este export trae UNA sola medida de existencia: la existencia general
+        # del día (la foto), NO el mínimo intradía. Todos estos encabezados
+        # apuntan a existencia_piezas, que es la columna que el motor usa. El
+        # matcher compara sin acentos y en minúsculas, así que cualquiera de
+        # estas variantes que mande Tableau entra por alias, no por posición.
         "existencia": "existencia_piezas",
+        "existencia piezas": "existencia_piezas",
+        "existencia minima": "existencia_piezas",
+        "existencia minima dia": "existencia_piezas",
+        "existencia del dia": "existencia_piezas",
     },
     "TABLEAU_VENTAS": {
         "codigo de barras": "sku",
@@ -82,9 +91,9 @@ ALIAS_CSV = {
 
 # A qué campo corresponde la columna que viene SIN ENCABEZADO.
 #
-# El export de Tableau deja el nombre de la medida en blanco, así que no hay
-# forma de deducirlo del archivo: se declara aquí. Confirmado con La Comer el
-# 2026-08-06: en ventas es el importe, no las unidades.
+# El export de Tableau a veces deja el nombre de la medida en blanco, así que
+# no hay forma de deducirlo del archivo: se declara aquí. Confirmado con La
+# Comer el 2026-08-06: en ventas es el importe, no las unidades.
 COLUMNA_SIN_NOMBRE = {
     "TABLEAU_INV_TIENDA": "existencia_piezas",
     "TABLEAU_VENTAS": "importe_venta",

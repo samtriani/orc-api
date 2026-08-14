@@ -38,8 +38,13 @@ TABLAS = {
     "CITAS_PROV_CEDIS":     {"tabla": "citas_prov_cedis",     "llave": ["folio_cita", "sku"]},
 }
 
-# Única columna cuyo nombre de spec no calza en minúsculas tal cual.
-RENOMBRES = {"CATALOGO": {"Nombre_Tienda": "nombre_tienda"}}
+# Campos cuyo nombre de spec no calza como columna SQL con solo minúsculas
+# (traen mayúsculas y/o espacios). Se mapean explícitamente aquí.
+RENOMBRES = {
+    "CATALOGO": {"Nombre_Tienda": "nombre_tienda"},
+    "BOPS_OSA": {"Alerta Enviada": "alerta_enviada", "Alerta Ejecutada": "alerta_ejecutada"},
+    "COMPRAS_PEDIDOS_PROV": {"Tienda_Destino": "tienda_destino"},
+}
 
 
 def columnas_de(hoja: str):

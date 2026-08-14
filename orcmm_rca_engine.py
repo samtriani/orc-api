@@ -69,6 +69,27 @@ class SubcausaProveedor(str, Enum):
     ENTREGA_PARCIAL = "Entregó menos de lo que confirmó en la cita"
 
 
+class SubcausaEjecucionTienda(str, Enum):
+    """Refinamiento de la prioridad 1 (RC01) con las banderas de alerta de BOPS.
+
+    NO cambia la causa ni el responsable: sigue siendo RC01 / Tienda. Sólo
+    afina el PORQUÉ del hueco de anaquel habiendo inventario en trastienda,
+    que es lo que cambia la conversación con el gerente de tienda:
+
+      - alerta enviada y NO atendida -> el sistema avisó y la tienda no surtió
+      - alerta enviada y atendida    -> surtió y aun así el hueco persistió
+                                        (surtido insuficiente o rezago de medición)
+      - sin alerta                    -> nunca se le avisó a la tienda del hueco
+                                        (posible falla del sistema de alertas)
+
+    Fuente: BOPS_OSA.alerta_enviada / alerta_ejecutada (layout V8). Sin las
+    banderas (None) no se refina: se respeta 'vacío no es cero'.
+    """
+    ALERTA_NO_ATENDIDA = "Alerta de BOPS enviada y no atendida en tienda"
+    ALERTA_ATENDIDA_PERSISTE = "Alerta atendida pero el hueco de anaquel persistió"
+    SIN_ALERTA = "Sin alerta de BOPS: la tienda no fue notificada del hueco"
+
+
 # Un día cuyo SKU no está en el catálogo de la tienda no es un día que el
 # modelo no supo explicar: es un día que no le tocaba explicar. En el layout
 # V5, BOPS_OSA entrega SKU de divisiones fuera del alcance (perfumería,
@@ -130,6 +151,21 @@ class SubcausaPedidoTienda(str, Enum):
 EVALUAR_PEDIDO_TIENDA = False
 
 NOTA_SIN_SIMA = ("Prioridad 3 omitida: sin datos de SIMA no se sabe si la tienda pidió")
+
+
+# ---------------------------------------------------------------------------
+# Refinamiento de RC01 con las banderas de alerta de BOPS (layout V8).
+#
+# No cambia la causa ni el responsable —sigue siendo RC01 / Tienda—, sólo
+# agrega la subcausa que explica el porqué del hueco. Se deja como constante,
+# no enterrada en un if, porque es un acuerdo de negocio:
+#   True  -> se afina la subcausa de RC01 con alerta_enviada/alerta_ejecutada
+#   False -> RC01 no se refina (comportamiento previo al V8)
+# PENDIENTE DE RATIFICAR CON LA COMER: si 'sin alerta' debe seguir siendo
+# responsabilidad de la tienda o abrir una causa de sistema de alertas. Por
+# ahora se mantiene RC01 / Tienda en los tres casos y sólo se distingue el
+# detalle, tal como se acordó.
+REFINAR_RC01_CON_ALERTA = True
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +257,12 @@ class EvidenciaSKUTienda:
     # --- Prioridad 1: ¿había producto en tienda?      Fuente: Inventario tienda / BOPS
     inventario_tienda: Optional[int] = None
 
+    # --- Prioridad 1, refinamiento: banderas de alerta de BOPS (layout V8).
+    # 1 / 0 / None. Sólo afinan la SUBCAUSA de RC01; no cambian causa ni
+    # responsable. None = sin dato (vacío no es cero): RC01 no se refina.
+    alerta_enviada: Optional[bool] = None
+    alerta_ejecutada: Optional[bool] = None
+
     # --- Prioridad 2: ¿había tránsito vigente?        Fuente: Tránsitos
     transito_vigente: Optional[bool] = None
 
@@ -268,7 +310,8 @@ class Dictamen:
     responsable: Responsable
     fuente: str
     evidencia: List[str] = field(default_factory=list)
-    subcausa: Optional[Union[SubcausaProveedor, SubcausaPedidoTienda]] = None
+    subcausa: Optional[Union[SubcausaProveedor, SubcausaPedidoTienda,
+                             SubcausaEjecucionTienda]] = None
 
 
 @dataclass
@@ -281,6 +324,39 @@ class Indeterminado:
 
 # None = la regla no aplica a este caso, continúa la cadena
 Evaluacion = Union[Dictamen, Indeterminado, None]
+
+
+# ---------------------------------------------------------------------------
+# Refinamiento de RC01 con alerta de BOPS — usado por prioridad 1 y prioridad 10
+# (ambas dictaminan RC01 / Tienda "Ejecución en Tienda"). No cambia causa ni
+# responsable: sólo devuelve la subcausa y anota la evidencia.
+# ---------------------------------------------------------------------------
+
+def subcausa_por_alerta(ev: EvidenciaSKUTienda, evidencia: List[str]):
+    """Subcausa de RC01 según las banderas de alerta de BOPS.
+
+    Devuelve None si el refinamiento está apagado o si no hay dato de alerta
+    (vacío no es cero). Cuando la alerta se envió pero no se sabe si se
+    ejecutó, tampoco se refina más allá de 'enviada', para no inventar.
+    """
+    if not REFINAR_RC01_CON_ALERTA or ev.alerta_enviada is None:
+        return None
+
+    if not ev.alerta_enviada:
+        evidencia.append("BOPS no envió alerta de este hueco de anaquel")
+        return SubcausaEjecucionTienda.SIN_ALERTA
+
+    # Alerta enviada: distinguir por ejecución. Sin dato de ejecución no se
+    # refina más (vacío no es cero).
+    if ev.alerta_ejecutada is None:
+        return None
+
+    if ev.alerta_ejecutada:
+        evidencia.append("Alerta de BOPS enviada y atendida; el hueco persistió")
+        return SubcausaEjecucionTienda.ALERTA_ATENDIDA_PERSISTE
+
+    evidencia.append("Alerta de BOPS enviada y no atendida en tienda")
+    return SubcausaEjecucionTienda.ALERTA_NO_ATENDIDA
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +391,14 @@ class R0_DentroDelCatalogo(Regla):
 
 
 class R1_InventarioEnTienda(Regla):
-    """Prioridad 1 — Inventario tienda > 0 → Ejecución en tienda."""
+    """Prioridad 1 — Inventario tienda > 0 → Ejecución en tienda.
+
+    Desde el layout V8 se refina con las banderas de alerta de BOPS
+    (alerta_enviada / alerta_ejecutada). El refinamiento NO cambia la causa ni
+    el responsable —sigue siendo RC01 / Tienda—: sólo distingue la SUBCAUSA,
+    para saber si la tienda ignoró la alerta, la atendió sin efecto, o nunca
+    fue notificada. Ver subcausa_por_alerta y REFINAR_RC01_CON_ALERTA.
+    """
     prioridad = 1
 
     def evalua(self, ev, ctx):
@@ -323,10 +406,13 @@ class R1_InventarioEnTienda(Regla):
             return Indeterminado(self.prioridad, ["inventario_tienda"])
 
         if ev.inventario_tienda > 0:
+            evidencia = [f"Inventario en tienda = {ev.inventario_tienda} (> 0)"]
+            subcausa = subcausa_por_alerta(ev, evidencia)
             return Dictamen(
                 self.prioridad, "RC01", CausaRaiz.RC01, Responsable.TIENDA,
                 "Inventario tienda / BOPS",
-                [f"Inventario en tienda = {ev.inventario_tienda} (> 0)"],
+                evidencia,
+                subcausa=subcausa,
             )
 
         ctx.append("Inventario en tienda = 0")
@@ -593,6 +679,9 @@ class R9_R10_RamaDSD(Regla):
 
       9:  No entregó a tienda → Incumplimiento Proveedor
       10: Sí entregó a tienda → Ejecución en Tienda
+
+    La prioridad 10 dictamina RC01 igual que la prioridad 1, así que también se
+    refina con las banderas de alerta de BOPS (misma subcausa, mismo criterio).
     """
     prioridad = 9
 
@@ -610,10 +699,13 @@ class R9_R10_RamaDSD(Regla):
                 ctx + ["Proveedor no entregó en tienda"],
             )
 
+        evidencia = ctx + ["Proveedor entregó en tienda, producto no llegó a anaquel"]
+        subcausa = subcausa_por_alerta(ev, evidencia)
         return Dictamen(
             10, "RC01", CausaRaiz.RC01, Responsable.TIENDA,
             "Recibo tienda",
-            ctx + ["Proveedor entregó en tienda, producto no llegó a anaquel"],
+            evidencia,
+            subcausa=subcausa,
         )
 
 

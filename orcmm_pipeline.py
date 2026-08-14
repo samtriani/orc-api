@@ -75,6 +75,28 @@ WRAP = Alignment(wrap_text=True, vertical="top")
 CEDIS_AUSENCIA_ES_CERO = True
 
 
+# ---------------------------------------------------------------------------
+# Parche V8 — la existencia de tienda que entrega Tableau es SÓLO la foto de
+# CIERRE del día (23:59). No hay mínimo intradía real: la columna "Existencia
+# Mínima" llegó duplicando el cierre. Esa foto miente en un día de faltante:
+# un producto que llegó tarde, o que es inventario fantasma, aparece con stock
+# aunque el anaquel estuvo vacío todo el día. Sin corregirlo, ~80% de los
+# faltantes caen en RC01 "Ejecución en tienda" (verificado: 37,752 días, de los
+# cuales el 100% tuvo CERO venta ese día).
+#
+# Criterio: en un día con faltante (OSA<umbral) con existencia de cierre > 0,
+# si el SKU NO vendió nada, el cierre no es confiable -> se trata como 0 y el
+# día fluye a las ramas de abasto (CEDIS / proveedor) en vez de quedar atrapado
+# en RC01. Se PRESERVA RC01 cuando BOPS envió alerta (alerta_enviada = 1): la
+# alerta es evidencia de que el producto estaba en tienda y se avisó surtirlo,
+# que es ejecución real.
+#
+# Es un criterio determinista y auditable, como CEDIS_AUSENCIA_ES_CERO. Cuando
+# Tableau entregue un mínimo intradía REAL, poner en False: el pipeline ya
+# prefiere existencia_minima_dia sobre la foto de cierre y este parche sobra.
+INVENTARIO_CIERRE_NO_CONFIABLE = True
+
+
 # Errores de Excel que llegan como texto en la celda. Aparecen cuando el layout
 # trae columnas calculadas con fórmula en vez de dato: si la fórmula no resuelve
 # —XLOOKUP guardado como `_xlfn.XLOOKUP` en un Excel que no la reconoce, un
@@ -121,6 +143,27 @@ def _decimal(v) -> Optional[float]:
     if _es_vacio(v):
         return None
     return float(v)
+
+
+def _bool_alerta(v) -> Optional[bool]:
+    """Bandera 0/1 de BOPS (alerta_enviada / alerta_ejecutada) a bool.
+
+    Respeta 'vacío no es cero': una celda vacía queda en None y la subcausa
+    de RC01 no se refina. Sólo un 0 o un 1 explícitos deciden. Tolera texto
+    ("1"/"0"/"Sí"/"No") por si el export cambia de tipo.
+    """
+    if _es_vacio(v):
+        return None
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    s = str(v).strip().lower()
+    if s in ("1", "si", "sí", "true", "verdadero", "x"):
+        return True
+    if s in ("0", "no", "false", "falso"):
+        return False
+    return None
 
 
 def _osa_pct(v) -> Optional[float]:
@@ -702,6 +745,7 @@ def _aplicar_citas(fu: Fuentes, orden: OrdenProveedor, folio, sku, D) -> OrdenPr
 def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTienda]:
     """Una evidencia por cada día con faltante (OSA por debajo del umbral)."""
     evidencias = []
+    inv_cierre_descartado = 0  # días RC01 evitados: cierre>0 sin venta ni alerta
     sin_catalogo = set()      # (sku, tienda) — se reportan juntos al final
     cedis_derivado = 0        # días con existencia de CEDIS leída como cero
 
@@ -725,6 +769,20 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             existencia = _entero(inv_t.get("existencia_minima_dia"))
             if existencia is None:
                 existencia = _entero(inv_t.get("existencia_piezas"))
+
+        # Parche V8: el cierre miente cuando el SKU no vendió nada ese día.
+        # Ver INVENTARIO_CIERRE_NO_CONFIABLE. Se preserva RC01 si BOPS alertó.
+        if INVENTARIO_CIERRE_NO_CONFIABLE and existencia is not None and existencia > 0:
+            venta_row = fu.ventas.get((sku, tienda, D))
+            vendidas = None
+            if venta_row is not None:
+                vendidas = _decimal(venta_row.get("unidades_vendidas"))
+                if vendidas is None:
+                    vendidas = _decimal(venta_row.get("importe_venta"))
+            alerto = _bool_alerta(fila_osa.get("alerta_enviada"))
+            if not vendidas and not alerto:
+                existencia = 0
+                inv_cierre_descartado += 1
 
         inv_c = fu.inv_cedis.get((sku, cedis, D)) if cedis else None
         existencia_cedis = None
@@ -757,6 +815,10 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             # puede afirmar que un SKU esté fuera del alcance.
             en_catalogo=None if fu.vacia("CATALOGO") else cat is not None,
             inventario_tienda=existencia,
+            # Banderas de alerta de BOPS (V8). Refinan la subcausa de RC01;
+            # None = sin dato (vacío no es cero).
+            alerta_enviada=_bool_alerta(fila_osa.get("alerta_enviada")),
+            alerta_ejecutada=_bool_alerta(fila_osa.get("alerta_ejecutada")),
             transito_vigente=derivar_transito_vigente(fu, sku, tienda, D),
             pedido_tienda_generado=derivar_pedido_tienda(fu, sku, tienda, D),
             tipo_resurtido=tipo_resurtido,
@@ -794,6 +856,15 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             f"CERO derivada de la ausencia de fila, porque el reporte omite los SKU "
             f"sin existencia (confirmado con La Comer). Es el único lugar del modelo "
             f"donde vacío se lee como cero; se apaga con CEDIS_AUSENCIA_ES_CERO.")
+
+    if inv_cierre_descartado:
+        fu.advertencias.append(
+            f"TABLEAU_INV_TIENDA: {inv_cierre_descartado} días con faltante traían "
+            f"existencia de CIERRE > 0 pero CERO venta y sin alerta de BOPS, así que "
+            f"el inventario de cierre se descartó (tratado como 0) para que el día "
+            f"fluya a las ramas de abasto en vez de caer en RC01 'Ejecución en "
+            f"tienda'. Tableau sólo entrega la foto de cierre (23:59), no el mínimo "
+            f"intradía; se apaga con INVENTARIO_CIERRE_NO_CONFIABLE.")
 
     return evidencias
 
