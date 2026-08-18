@@ -288,6 +288,18 @@ ALIAS_ENCABEZADOS = {
         "cita": "folio_cita",
         "estatus cita": "estatus_cita",
     },
+    "SIMA_PEDIDOS_TIENDA": {
+        # SIMA entrega la columna como "numero_pedido" — es el nombre que usa
+        # su sistema. El spec la llama `folio`, igual que en las otras hojas de
+        # evento, para que las cuatro se lean con el mismo vocabulario. Se
+        # empareja por alias en vez de renombrar el spec: así el archivo entra
+        # tal como sale de SIMA, sin que nadie tenga que editarlo a mano.
+        "numero_pedido": "folio",
+        "numero de pedido": "folio",
+        "número de pedido": "folio",
+        "no. de pedido": "folio",
+        "pedido": "folio",
+    },
 }
 
 

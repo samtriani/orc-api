@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS catalogo (
     linea_vs_io       TEXT,
     estatus_activo    TEXT NOT NULL,
     nombre_tienda     TEXT,
+    -- V8: proveedor principal del SKU. Duplica lo que ya vive en compras y
+    -- citas, pero permite conocerlo sin depender de una orden abierta.
+    proveedor_id      TEXT,
+    proveedor_nombre  TEXT,
     cargado_en        TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sku, tienda)
 );
@@ -37,8 +41,13 @@ CREATE TABLE IF NOT EXISTS tableau_inv_tienda (
     sku                    TEXT NOT NULL,
     tienda                 TEXT NOT NULL,
     fecha                  DATE NOT NULL,
-    existencia_piezas      INTEGER NOT NULL,
+    -- Nullable desde el V8: puede venir vacía, y el modelo distingue "no
+    -- había" de "no se midió". Forzar NOT NULL obligaría a inventar un cero,
+    -- que es justo lo que el pipeline evita en todas partes.
+    existencia_piezas      INTEGER,
     hora_de_corte          TEXT,
+    -- V8: el mínimo intradía, cuando Tableau lo entregue de verdad. Hoy llega
+    -- duplicando la foto de cierre — ver INVENTARIO_CIERRE_NO_CONFIABLE.
     existencia_minima_dia  INTEGER,
     cargado_en             TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sku, tienda, fecha)
@@ -57,6 +66,11 @@ CREATE TABLE IF NOT EXISTS bops_osa (
     venta_perdida_estimada  NUMERIC(14,2) NOT NULL,
     numero_rupturas         INTEGER,
     minutos_sin_producto    INTEGER,
+    -- V8: banderas 0/1 del sistema de alertas. Refinan la SUBCAUSA de RC01
+    -- sin cambiar la causa ni el responsable (ver REFINAR_RC01_CON_ALERTA).
+    -- Nullable a propósito: vacío no es cero, y sin bandera no se refina.
+    alerta_enviada          INTEGER,
+    alerta_ejecutada        INTEGER,
     cargado_en              TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sku, tienda, fecha)
 );
@@ -154,6 +168,8 @@ CREATE TABLE IF NOT EXISTS compras_pedidos_prov (
     cajas_pedidas       INTEGER NOT NULL,
     cajas_entregadas    INTEGER NOT NULL,
     estatus             TEXT,
+    -- V8: tienda que originó el pedido a proveedor. Informativa por ahora.
+    tienda_destino      TEXT,
     cargado_en          TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (folio, sku)
 );

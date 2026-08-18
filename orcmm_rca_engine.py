@@ -126,29 +126,29 @@ class SubcausaPedidoTienda(str, Enum):
 
 
 # ===========================================================================
-# INTERRUPTOR TEMPORAL — PRIORIDAD 3 / SIMA_PEDIDOS_TIENDA   (2026-08-05)
+# PRIORIDAD 3 / SIMA_PEDIDOS_TIENDA   (apagada 2026-08-05, PRENDIDA 2026-08-18)
 #
-# SIMA todavía no entrega los pedidos de tienda; los están procesando. Sin ese
-# dato la prioridad 3 no puede decidir y, como es determinista, cerraba TODOS
-# los días como RC99 antes de llegar siquiera a preguntar por CEDIS o por el
-# proveedor: el modelo entero quedaba en 0% de cobertura.
+# SIMA ya entrega los pedidos de tienda, así que la prioridad 3 vuelve a
+# evaluarse y RC03 'Pedido No Generado' es alcanzable otra vez.
 #
-# En False, la regla 3 se salta y el árbol pasa de largo del inventario en
-# tienda a la vía de resurtido, como si la pregunta '¿la tienda pidió?' no
-# existiera. Es un análisis PARCIAL a propósito, y cuesta esto:
+# Lo que estuvo pasando mientras estuvo apagada, y que ahora se corrige: la
+# regla 3 se saltaba y el árbol pasaba de largo del inventario en tienda a la
+# vía de resurtido, como si la pregunta '¿la tienda pidió?' no existiera. Los
+# días que le tocaban a RC03 se repartieron entre RC04, RC05 y RC06 — o sea,
+# se le estuvo cobrando a CEDIS y al proveedor un faltante que en realidad se
+# explicaba porque la tienda nunca pidió.
 #
-#   - RC03 'Pedido No Generado' se vuelve inalcanzable: ningún día puede
-#     salir con esa causa, aunque sea la verdadera.
-#   - Sus días se reparten entre RC04, RC05 y RC06. O sea, se le puede estar
-#     cobrando a CEDIS o al proveedor un faltante que en realidad se explica
-#     porque la tienda nunca pidió.
+# CONSECUENCIA AL PRENDERLA: el Pareto se mueve. Los días que hoy salen como
+# RC04/RC05/RC06 y que tengan un pedido de tienda ausente van a pasar a RC03 /
+# Tienda. No es un dato nuevo: es el que faltaba para no culpar al de junto.
 #
-# El resultado sirve para ver la rama de abasto, no para repartir culpas en
-# firme. Cuando llegue SIMA: poner True y volver a correr. No hay que tocar
-# nada más — la regla, la derivación y la columna de salida siguen enteras.
+# OJO con la cobertura de la hoja: si SIMA llega recortada a unos días, un día
+# sin pedido NO significa que la tienda no pidió, sino que no se sabe — y la
+# regla lo leería como culpa de la tienda. Antes de publicar un Pareto con
+# esto, confirmar que la extracción cubre TODO el periodo analizado.
 # ===========================================================================
 
-EVALUAR_PEDIDO_TIENDA = False
+EVALUAR_PEDIDO_TIENDA = True
 
 NOTA_SIN_SIMA = ("Prioridad 3 omitida: sin datos de SIMA no se sabe si la tienda pidió")
 
