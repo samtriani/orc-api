@@ -29,6 +29,72 @@ las entradas viejas — así queda el historial de decisiones.
 
 ---
 
+## Sesión 2026-08-18 — el dashboard se vendió, prioridad 3 prendida y el OSA que siempre daba 0
+
+El cliente aprobó el dashboard y mandó **20 peticiones de mejora**. Se
+hicieron 15 (orc-api `d5f5be5`, `74fb1a5` · orc-gui `a2d7b23`).
+
+**Lo que mueve números — avisar antes de comparar contra un reporte viejo:**
+
+1. **Prioridad 3 PRENDIDA** (`EVALUAR_PEDIDO_TIENDA = True`). SIMA ya
+   entrega. Los días que le tocaban a RC03 se estaban repartiendo entre
+   RC04/RC05/RC06: se le cobraba a CEDIS y al proveedor un faltante que se
+   explicaba porque la tienda no pidió. **El Pareto se mueve.** Probado:
+   sin pedido → RC03/Tienda; sin dato → RC99 bloqueado por
+   `pedido_tienda_generado`, **no** culpa a la tienda.
+2. **OSA PROM salía 0.0 en TODOS los renglones** — lo cachó el cliente al
+   descargar el Excel que se le mandó a Flor. No era dato malo:
+   `osa_promedio` promedia los días CON faltante, y como BOPS reporta OSA
+   **binario** (0 = no visible), esos días valen 0 por definición.
+   Verificado: 332 de 332 SKU en 0.0. Ahora `osa_periodo` = días visibles /
+   días **medidos** (no del calendario: BOPS trae ~31.6 de 43 días por SKU,
+   y afirmar algo de un día sin fila sería inventarlo).
+   **El Excel cambió de columnas**: "OSA prom." → "días eval." + "OSA del
+   periodo".
+3. **Proveedores: de 648 a 643.** Nestlé salía dos veces —dos IDs
+   distintos, 16661 y 16653—. La clave de consolidación normaliza a sólo
+   letras y números: quitar puntuación no basta, `S.A. DE C.V.` se vuelve
+   `S A DE C V` y no empata con `SA DE CV`. Aparecieron 5 más que nadie
+   había notado: Herdez, La Costeña, PepsiCo, Mondelez.
+
+**Datos y esquema:**
+
+- SIMA entrega la columna como **`numero_pedido`**; el spec la llama
+  `folio`. Entra por `ALIAS_ENCABEZADOS`, así el archivo carga tal como
+  sale de SIMA. **Confirmado con el cliente: son PIEZAS individuales, no
+  cajas.**
+- `schema.sql` estaba **desfasado** de `migracion_v8.sql`: faltaban las
+  banderas de alerta, `proveedor_*` en catálogo, `tienda_destino` en
+  compras, y `existencia_piezas` seguía `NOT NULL`. Ya calza con el spec
+  en las 9 tablas.
+
+**PENDIENTE CRÍTICO — el OOM.** La corrida completa de Coyoacán **mata la
+máquina** (`exit_code=137, oom_killed=true`), y los 4 GB de `fffefd6` no
+alcanzaron. Medido por etapas: `leer_fuentes_db` se lleva el **78%** (1.9
+GB) y el Excel de openpyxl el resto. La tabla grande es **BOPS_OSA con
+886,313 filas** para una tienda en 43 días (no compras, que son 186 mil).
+El recorte de columnas quedó **verificado byte-idéntico** (JSON de
+1,180,978 bytes con y sin recorte) pero **NO está aplicado** — hay que
+rehacerlo. Y ojo: el recorte solo no basta, el Excel necesita su propia
+solución.
+
+**Lo que sigue, con decisión del cliente pendiente:**
+
+- **Filtros División / Sección / Categoría / Subcategoría**: sólo existe
+  `division` (y `grupo_seccion` en `catalogo_sku_tienda`). **Categoría y
+  Subcategoría no están en ninguna tabla** — hay que pedirlas.
+- **Bottom 10 de proveedores + "Nivel de Servicio"**: hoy hay **tres**
+  definiciones distintas (`pct_surtido_pedido`, `pct_efectivo`,
+  `pct_cumplimiento`) y el ranking cambia según cuál mande. Falta que el
+  cliente elija. "OSA del proveedor" no existe: hay que construirlo con el
+  link SKU→proveedor que el V8 trajo al catálogo.
+- **Pedido de tienda por día con cantidad** en el expediente: el índice
+  `pedidos_tienda_por` sólo guarda fechas, no cantidades; agregarlas toca
+  la ruta de clasificación. Se dejó para cuando SIMA esté cargada y se
+  pueda verificar de punta a punta.
+
+---
+
 ## Sesión 2026-08-11 (noche) — filtros que sí llegan al Pareto, y la grafica arreglada
 
 **Se hizo:**
