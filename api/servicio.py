@@ -30,7 +30,8 @@ from orcmm_pipeline import (Fuentes, PaqueteFuentes, aviso_prioridad_3,  # noqa:
                             citas_incumplidas, derivar_evidencias,
                             desempeno_proveedores, discrepancias_pedido_cita,
                             escribir_resultado, fill_rate_proveedor, leer_fuentes,
-                            osa_alcance, osa_general, waterfall_osa)
+                            nivel_servicio_tienda, osa_alcance, osa_general,
+                            universo_osa, waterfall_osa)
 from orcmm_rca_engine import FUERA_DE_CATALOGO                  # noqa: E402
 from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
                                dentro_del_alcance, diagnosticar_periodo,
@@ -172,6 +173,8 @@ def _cobertura_a_dict(cob: dict) -> dict:
 def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
     return [{
         "proveedor_id": d.proveedor_id,
+        # Cuando el mismo proveedor viene con varios IDs, aquí van todos.
+        "ids": d.ids,
         "nombre": d.nombre,
         "pedidos": d.pedidos,
         "cajas_pedidas": d.cajas_pedidas,
@@ -264,7 +267,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         }
 
     diagnosticos = clasificar(evidencias)
-    cob, _ = escribir_resultado(salida, fu, evidencias, diagnosticos)
+    cob, _ = escribir_resultado(salida, fu, evidencias, diagnosticos, umbral_osa)
 
     # El Pareto y el detalle por SKU van sobre el alcance; la cobertura sigue
     # contando todo y reporta los días fuera de catálogo aparte. Mismo criterio
@@ -281,11 +284,16 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "dias_clasificados": d.dias_clasificados,
         "cobertura_pct": d.cobertura_pct,
         "venta_perdida": d.venta_perdida_total,
+        # osa_promedio se conserva por compatibilidad, pero NO se muestra: da
+        # 0 siempre (promedia sólo los días con faltante, que valen 0 por
+        # definición). El bueno es osa_periodo, sobre los días evaluados.
         "osa_promedio": d.osa_promedio,
+        "dias_evaluados": d.dias_evaluados,
+        "osa_periodo": d.osa_periodo,
         "root_cause_id": d.root_cause_id_dominante,
         "causa": d.causa_dominante,
         "responsable": d.responsable_dominante,
-    } for d in diagnosticar_periodo(en_alcance)]
+    } for d in diagnosticar_periodo(en_alcance, universo_osa(fu, umbral_osa))]
 
     return {
         "hay_resultados": True,
@@ -295,6 +303,8 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "osa_general": osa_general(fu),
         "waterfall": waterfall_osa(fu, diagnosticos),
         "fill_rate_proveedor": fill_rate_proveedor(fu),
+        # La otra pata de la cadena: proveedor→CEDIS arriba, CEDIS→tienda aquí.
+        "nivel_servicio_tienda": nivel_servicio_tienda(fu),
         "umbral_osa": umbral_osa,
         "aviso_parcial": aviso_prioridad_3(fu),
         "advertencias": fu.advertencias,

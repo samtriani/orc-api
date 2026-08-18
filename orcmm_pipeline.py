@@ -207,6 +207,31 @@ def osa_alcance(fu: "Fuentes") -> Optional[float]:
     return round(sum(valores) / len(valores), 1) if valores else None
 
 
+def universo_osa(fu: "Fuentes", umbral_osa: float) -> Dict[Tuple[str, str], Tuple[int, int]]:
+    """(sku, tienda) -> (días medidos, días visibles) sobre TODO el periodo.
+
+    Es el insumo del OSA por SKU del periodo. Se arma aquí y no en
+    orcmm_rca_periodo porque allá sólo llegan los días con faltante: los días
+    sanos —que son el numerador— nunca salen de Fuentes.
+
+    "Medidos" es a propósito: BOPS no trae fila de todos los SKU todos los
+    días (en Coyoacán son ~31.6 días por SKU en un rango de 43). El
+    denominador son los días que alguien midió, no los del calendario;
+    afirmar algo de un día sin fila sería inventarlo. Los días sin lectura de
+    OSA no cuentan ni arriba ni abajo.
+    """
+    medidos: Dict[Tuple[str, str], int] = defaultdict(int)
+    visibles: Dict[Tuple[str, str], int] = defaultdict(int)
+    for (sku, tienda, _), fila in fu.osa.items():
+        v = _osa_pct(fila.get("osa_pct"))
+        if v is None:
+            continue
+        medidos[(sku, tienda)] += 1
+        if v >= umbral_osa:
+            visibles[(sku, tienda)] += 1
+    return {k: (n, visibles.get(k, 0)) for k, n in medidos.items()}
+
+
 def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
     """De 100% al OSA real, en puntos porcentuales y por causa.
 
@@ -291,6 +316,45 @@ def fill_rate_proveedor(fu: "Fuentes") -> dict:
         "pct_cumplimiento": tasa(entregadas, confirmadas),
         # Confirmado al agendar sobre lo pedido.
         "pct_confirmado": tasa(confirmadas, pedidas_con_cita),
+    }
+
+
+def nivel_servicio_tienda(fu: "Fuentes") -> dict:
+    """Qué tanto de lo que la tienda pidió a CEDIS le llegó, en PIEZAS.
+
+    Confirmado con La Comer: SIMA entrega piezas individuales, no cajas
+    (`cantidad_pedida_piezas` / `cantidad_surtida_piezas`). No se convierte a
+    cajas: habría que dividir entre el empaque del catálogo y el resultado
+    heredaría ese error, cuando el dato de origen ya es exacto.
+
+    Se mide sobre piezas y no promediando pedidos, mismo criterio que
+    fill_rate_proveedor: un pedido de 4 piezas no puede pesar igual que uno de
+    948. Es la pata que faltaba de la cadena —proveedor→CEDIS ya se medía,
+    CEDIS→tienda no—, y con ella se puede decir en qué tramo se cae el surtido.
+    """
+    pedidas = surtidas = 0
+    pedidos = completos = sin_surtir = 0
+    for p in fu.pedidos_tienda:
+        pide = _entero(p.get("cantidad_pedida_piezas"))
+        if pide is None:
+            continue          # sin denominador no hay tasa: vacío no es cero
+        surte = _entero(p.get("cantidad_surtida_piezas")) or 0
+        pedidas += pide
+        surtidas += surte
+        pedidos += 1
+        if surte >= pide:
+            completos += 1
+        elif surte == 0:
+            sin_surtir += 1
+
+    return {
+        "pedidos": pedidos,
+        "piezas_pedidas": pedidas,
+        "piezas_surtidas": surtidas,
+        "pedidos_completos": completos,
+        "pedidos_sin_surtir": sin_surtir,
+        # Piezas surtidas sobre pedidas: el nivel de servicio de portada.
+        "nivel_servicio_pct": round(surtidas / pedidas * 100, 1) if pedidas else None,
     }
 
 
@@ -925,6 +989,10 @@ class DesempenoProveedor:
     """
     proveedor_id: str
     nombre: str
+    # Los IDs que se consolidaron en este renglón. Casi siempre es uno; cuando
+    # son varios, el mismo proveedor viene dado de alta más de una vez en
+    # COMPRAS (ver _clave_proveedor). Se conservan para poder rastrearlo.
+    ids: List[str] = field(default_factory=list)
     pedidos: int = 0
     cajas_pedidas: int = 0
     cajas_surtidas_pedido: int = 0     # cierre de la orden, según COMPRAS
@@ -960,6 +1028,30 @@ class DesempenoProveedor:
         return self._tasa(self.cajas_entregadas, self.cajas_pedidas_con_cita)
 
 
+def _clave_proveedor(nombre: Optional[str], pid: Optional[str]) -> str:
+    """Clave para consolidar un proveedor que viene dado de alta varias veces.
+
+    Verificado contra los datos reales de COMPRAS: el mismo proveedor aparece
+    con dos IDs distintos —Nestlé como 16661 "MARCAS NESTLE, S.A. DE C.V." y
+    16653 "MARCAS NESTLE SA DE CV", PepsiCo como 154833 y 929482— así que
+    agrupar por ID lo parte en dos renglones que compiten entre sí en el
+    ranking. Y al revés: 8 IDs traen el mismo nombre escrito de dos formas que
+    sólo difieren en espacios dobles ("SA DE  CV").
+
+    Por eso la clave es el NOMBRE normalizado y el ID sólo se usa cuando no hay
+    nombre. Los IDs originales no se pierden: van en `ids`.
+
+    La normalización se queda SÓLO con letras y números: quitar la puntuación
+    no basta, porque "S.A. DE C.V." se vuelve "S A DE C V" y no empata con
+    "SA DE CV" —que es justo el caso de Nestlé—. Sin los espacios, las dos
+    grafías caen en la misma clave.
+    """
+    n = _texto(nombre)
+    if not n:
+        return f"#{_texto(pid) or '(sin id)'}"
+    return "".join(c for c in n.upper() if c.isalnum())
+
+
 def desempeno_proveedores(fu: Fuentes) -> List[DesempenoProveedor]:
     """Scorecard por proveedor, construido sobre las hojas de origen.
 
@@ -972,8 +1064,16 @@ def desempeno_proveedores(fu: Fuentes) -> List[DesempenoProveedor]:
 
     for o in fu.pedidos_prov:
         pid = _texto(o.get("proveedor_id")) or "(sin id)"
-        d = prov.setdefault(pid, DesempenoProveedor(
-            pid, _texto(o.get("proveedor_nombre")) or ""))
+        nombre = _texto(o.get("proveedor_nombre")) or ""
+        clave = _clave_proveedor(nombre, pid)
+        d = prov.setdefault(clave, DesempenoProveedor(pid, nombre))
+        if pid not in d.ids:
+            d.ids.append(pid)
+        # Se queda la grafía más larga: entre "MARCAS NESTLE SA DE CV" y
+        # "MARCAS NESTLE, S.A. DE C.V." la segunda es la que trae la razón
+        # social completa, y es la que una persona reconoce.
+        if len(nombre) > len(d.nombre):
+            d.nombre = nombre
         pedidas = _entero(o.get("cajas_pedidas")) or 0
         d.pedidos += 1
         d.cajas_pedidas += pedidas
@@ -1176,7 +1276,7 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
 
 
 def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTienda],
-                       diagnosticos: List[dict]):
+                       diagnosticos: List[dict], umbral_osa: float = 100.0):
     wb = openpyxl.Workbook()
     aviso = aviso_prioridad_3(fu)
 
@@ -1246,7 +1346,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     for col, w in zip("ABCDEF", [4, 40, 12, 18, 14, 26]):
         ws.column_dimensions[col].width = w
 
-    diags = diagnosticar_periodo(en_alcance)
+    diags = diagnosticar_periodo(en_alcance, universo_osa(fu, umbral_osa))
     par = pareto_periodo(diags)
 
     ws["B2"] = "Pareto del periodo"
@@ -1329,7 +1429,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     # Es la lista accionable: qué combinación está costando más y de quién es.
     ws = wb.create_sheet("Por SKU-Tienda")
     ws.sheet_view.showGridLines = False
-    for j, w in enumerate([16, 9, 12, 12, 11, 15, 11, 8, 26, 20, 60], 1):
+    for j, w in enumerate([16, 9, 12, 12, 11, 15, 11, 15, 8, 26, 20, 60], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
 
     ws["A1"] = "Desglose por SKU y tienda — ordenado por impacto"
@@ -1338,9 +1438,13 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
                 "El desglose muestra cómo se repartió el impacto entre causas.")
     ws["A2"].font = CHICA
 
+    # "OSA del periodo" reemplaza al viejo "OSA prom.", que promediaba sólo los
+    # días con faltante y por eso salía 0.0 en TODOS los renglones (BOPS reporta
+    # OSA binario: un día con faltante vale 0 por definición). Se agrega al lado
+    # "días eval." para que el porcentaje se pueda leer contra su denominador.
     _encabezado(ws, 4, ["sku", "tienda", "días faltante", "días clasif.", "cobertura",
-                        "venta perdida", "OSA prom.", "RC", "causa dominante",
-                        "responsable", "desglose de causas"])
+                        "venta perdida", "días eval.", "OSA del periodo", "RC",
+                        "causa dominante", "responsable", "desglose de causas"])
     ws.row_dimensions[4].height = 32
 
     for i, dd in enumerate(diags):
@@ -1350,7 +1454,8 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
             sorted(dd.desglose_causas.items(), key=lambda kv: kv[1], reverse=True))
 
         valores = [dd.sku, dd.tienda, dd.dias_con_faltante, dd.dias_clasificados,
-                   dd.cobertura_pct / 100, dd.venta_perdida_total, dd.osa_promedio,
+                   dd.cobertura_pct / 100, dd.venta_perdida_total, dd.dias_evaluados,
+                   None if dd.osa_periodo is None else dd.osa_periodo / 100,
                    dd.root_cause_id_dominante, dd.causa_dominante,
                    dd.responsable_dominante, desglose]
         for j, v in enumerate(valores, 1):
@@ -1358,7 +1463,8 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
             c.border = BORDE
         ws.cell(row=r, column=5).number_format = "0.0%"
         ws.cell(row=r, column=6).number_format = '$#,##0.00'
-        rc = ws.cell(row=r, column=8)
+        ws.cell(row=r, column=8).number_format = "0.0%"
+        rc = ws.cell(row=r, column=9)
         rc.font = NEGRITA
         rc.fill = PatternFill("solid", fgColor=COLOR_CAUSA.get(dd.root_cause_id_dominante, GRIS))
         rc.alignment = Alignment(horizontal="center")
@@ -1366,7 +1472,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
             ws.cell(row=r, column=5).fill = PatternFill("solid", fgColor=AMBAR)
 
     ws.freeze_panes = "C5"
-    ws.auto_filter.ref = f"A4:K{4 + len(diags)}"
+    ws.auto_filter.ref = f"A4:L{4 + len(diags)}"
 
     # --- Proveedor y citas ------------------------------------------------
     escribir_hoja_proveedor(wb, fu, en_alcance)

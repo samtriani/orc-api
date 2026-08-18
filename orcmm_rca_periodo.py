@@ -58,6 +58,10 @@ class DiagnosticoPeriodoSKUTienda:
     responsable_dominante: str
     desglose_causas: Dict[str, float]        # causa -> venta perdida atribuida
     desglose_responsables: Dict[str, float]  # responsable -> venta perdida
+    # OSA del SKU en TODO el periodo, no sólo en sus días malos. Requiere el
+    # universo (ver universo_osa en orcmm_pipeline); sin él quedan en None.
+    dias_evaluados: Optional[int] = None
+    osa_periodo: Optional[float] = None
 
     @property
     def cobertura_pct(self) -> float:
@@ -82,10 +86,18 @@ def dentro_del_alcance(diagnosticos: List[dict]) -> List[dict]:
             if FUERA_DE_CATALOGO not in dg["datos_faltantes"]]
 
 
-def diagnosticar_periodo(diagnosticos: List[dict]) -> List[DiagnosticoPeriodoSKUTienda]:
+def diagnosticar_periodo(diagnosticos: List[dict],
+                          universo: Optional[Dict[Tuple[str, str], Tuple[int, int]]] = None
+                          ) -> List[DiagnosticoPeriodoSKUTienda]:
     """Agrupa los veredictos diarios por SKU + Tienda.
 
     Recibe la salida de clasificar(); no vuelve a correr el motor.
+
+    `universo` —(sku, tienda) -> (días medidos, días visibles)— sirve para el
+    OSA del periodo. Va aparte porque aquí sólo llegan los días CON faltante,
+    y el OSA de verdad necesita también los días sanos, que se quedaron en
+    Fuentes. Lo arma universo_osa() en orcmm_pipeline. Sin él, osa_periodo
+    queda en None y no se inventa nada.
     """
     grupos: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
     for dg in diagnosticos:
@@ -123,9 +135,18 @@ def diagnosticar_periodo(diagnosticos: List[dict]) -> List[DiagnosticoPeriodoSKU
         else:
             causa_dominante = Counter(dg["causa_raiz"] for dg in diags).most_common(1)[0][0]
 
+        medidos, visibles = (universo or {}).get((sku, tienda), (None, None))
+
         resultados.append(DiagnosticoPeriodoSKUTienda(
             sku=sku,
             tienda=tienda,
+            dias_evaluados=medidos,
+            # OSA real: días visibles sobre días medidos. NO se usa osa_promedio
+            # para esto — ese promedia sólo los días con faltante, y como BOPS
+            # reporta OSA binario (0 = no visible), esos días valen 0 por
+            # definición: daba exactamente 0 para todos los SKU, siempre.
+            osa_periodo=(round(visibles / medidos * 100, 1)
+                         if medidos else None),
             dias_con_faltante=len(diags),
             dias_clasificados=dias_clasificados,
             venta_perdida_total=round(venta_perdida_total, 2),
