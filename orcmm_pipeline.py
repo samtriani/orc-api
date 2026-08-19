@@ -36,7 +36,7 @@ from openpyxl.utils import get_column_letter
 from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
                                llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
-                               normalizar_encabezado)
+                               ORIGEN_CENTRALIZADO, normalizar_encabezado)
 from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, FUERA_DE_CATALOGO,
                               EvidenciaSKUTienda, TipoResurtido, ViaResurtido)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
@@ -609,7 +609,10 @@ def _indexar_eventos(fu: Fuentes) -> None:
         ))
 
     for p in fu.pedidos_tienda:
-        clave = (_texto(p.get("sku")), _texto(p.get("tienda")))
+        # `origen` es quién generó el pedido: la tienda, o el proceso central
+        # (ORIGEN_CENTRALIZADO). Se indexa tal cual y derivar_pedido_tienda se
+        # encarga de mirar las dos llaves.
+        clave = (_texto(p.get("sku")), _texto(p.get("origen")))
         fu.pedidos_tienda_por.setdefault(clave, []).append((
             _fecha(p.get("fecha_pedido")),
             _fecha(p.get("fecha_surtido")),
@@ -660,11 +663,16 @@ def _revisar_cobertura_de_sima(fu: Fuentes) -> None:
     if fu.vacia("SIMA_PEDIDOS_TIENDA") or fu.vacia("CATALOGO"):
         return
 
-    con_pedido = {(s, t) for (s, t) in fu.pedidos_tienda_por}
     del_catalogo = set(fu.catalogo)
-    cubiertos = len(con_pedido & del_catalogo)
     if not del_catalogo:
         return
+
+    # Un SKU está cubierto si lo pidió su tienda O si viene por pedido
+    # centralizado — las dos formas cuentan, igual que en derivar_pedido_tienda.
+    centralizados = {s for (s, o) in fu.pedidos_tienda_por if o == ORIGEN_CENTRALIZADO}
+    con_pedido = {(s, t) for (s, t) in fu.pedidos_tienda_por if t != ORIGEN_CENTRALIZADO}
+    con_pedido |= {(s, t) for (s, t) in del_catalogo if s in centralizados}
+    cubiertos = len(con_pedido & del_catalogo)
 
     pct = round(cubiertos / len(del_catalogo) * 100, 1)
     if pct >= 50:
@@ -782,7 +790,19 @@ def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     """
     if fu.vacia("SIMA_PEDIDOS_TIENDA"):
         return None
-    eventos = fu.pedidos_tienda_por.get((sku, tienda))
+    # Los que generó la tienda MÁS los centralizados. Un pedido centralizado
+    # también resurte a la tienda: la diferencia es quién lo generó, no a quién
+    # llega. Si sólo se miraran los de la tienda, un SKU que se pide de forma
+    # centralizada saldría siempre como "no pidió" — otra vez culpando a la
+    # tienda por algo que no le toca hacer.
+    #
+    # Un pedido con ORIGEN_CENTRALIZADO cubre a TODAS las tiendas, no a una
+    # (confirmado con La Comer, 2026-08-19). Por eso no hace falta guardar a
+    # qué sucursal pertenece: la misma fila aplica a todas, y cuando viene
+    # repetida en el archivo de dos tiendas el upsert por (folio, sku) la deja
+    # igual en vez de duplicarla.
+    eventos = list(fu.pedidos_tienda_por.get((sku, tienda), ()))
+    eventos += fu.pedidos_tienda_por.get((sku, ORIGEN_CENTRALIZADO), ())
     if not eventos:
         return None
     for pedido, surtido in eventos:
@@ -1084,6 +1104,10 @@ class DesempenoProveedor:
     # son varios, el mismo proveedor viene dado de alta más de una vez en
     # COMPRAS (ver _clave_proveedor). Se conservan para poder rastrearlo.
     ids: List[str] = field(default_factory=list)
+    # Disponibilidad de los SKU de este proveedor en el periodo. None cuando
+    # ninguno de sus SKU está en el catálogo de la tienda analizada.
+    osa_periodo: Optional[float] = None
+    dias_evaluados: Optional[int] = None
     pedidos: int = 0
     cajas_pedidas: int = 0
     cajas_surtidas_pedido: int = 0     # cierre de la orden, según COMPRAS
@@ -1119,6 +1143,33 @@ class DesempenoProveedor:
         return self._tasa(self.cajas_entregadas, self.cajas_pedidas_con_cita)
 
 
+def universo_osa_por_proveedor(fu: "Fuentes", umbral_osa: float
+                                ) -> Dict[str, Tuple[int, int]]:
+    """proveedor_id -> (días medidos, días visibles) de TODOS sus SKU.
+
+    Insumo del "OSA del proveedor". Se indexa por ID y no por nombre a
+    propósito: el catálogo escribe "MARCAS NESTLE" y compras "MARCAS NESTLE,
+    S.A. DE C.V.", así que emparejar por nombre fallaría justo en los
+    proveedores grandes. El ID sí calza exacto entre las dos fuentes.
+
+    OJO con lo que mide: es la disponibilidad de los productos de ese
+    proveedor, NO su culpa. Un día que el SKU faltó por ejecución en tienda
+    (RC01) también baja este número. Es descriptivo, no atributivo.
+    """
+    medidos: Dict[str, int] = defaultdict(int)
+    visibles: Dict[str, int] = defaultdict(int)
+    for (sku, tienda), (m, v) in universo_osa(fu, umbral_osa).items():
+        cat = fu.catalogo.get((sku, tienda))
+        if not cat:
+            continue
+        pid = _texto(cat.get("proveedor_id"))
+        if not pid:
+            continue
+        medidos[pid] += m
+        visibles[pid] += v
+    return {p: (n, visibles.get(p, 0)) for p, n in medidos.items()}
+
+
 def _clave_proveedor(nombre: Optional[str], pid: Optional[str]) -> str:
     """Clave para consolidar un proveedor que viene dado de alta varias veces.
 
@@ -1143,7 +1194,8 @@ def _clave_proveedor(nombre: Optional[str], pid: Optional[str]) -> str:
     return "".join(c for c in n.upper() if c.isalnum())
 
 
-def desempeno_proveedores(fu: Fuentes) -> List[DesempenoProveedor]:
+def desempeno_proveedores(fu: Fuentes, umbral_osa: float = 100.0
+                           ) -> List[DesempenoProveedor]:
     """Scorecard por proveedor, construido sobre las hojas de origen.
 
     No depende de la clasificación: mide al proveedor sobre TODOS sus pedidos
@@ -1183,6 +1235,17 @@ def desempeno_proveedores(fu: Fuentes) -> List[DesempenoProveedor]:
             d.cajas_entregadas += entregadas
             if entregadas < confirmadas:
                 d.citas_incumplidas += 1
+
+    # OSA de los SKU de cada proveedor. Se suma sobre TODOS los IDs que se
+    # consolidaron en el renglón: Nestlé viene con dos altas distintas y su
+    # universo de SKU está repartido entre las dos.
+    universo = universo_osa_por_proveedor(fu, umbral_osa)
+    for d in prov.values():
+        medidos = sum(universo.get(p, (0, 0))[0] for p in d.ids)
+        visibles = sum(universo.get(p, (0, 0))[1] for p in d.ids)
+        if medidos:
+            d.dias_evaluados = medidos
+            d.osa_periodo = round(visibles / medidos * 100, 1)
 
     return sorted(prov.values(), key=lambda d: d.cajas_pedidas, reverse=True)
 

@@ -170,7 +170,7 @@ def _cobertura_a_dict(cob: dict) -> dict:
     }
 
 
-def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
+def _proveedores_a_dict(fu: Fuentes, umbral_osa: float = 100.0) -> List[dict]:
     return [{
         "proveedor_id": d.proveedor_id,
         # Cuando el mismo proveedor viene con varios IDs, aquí van todos.
@@ -178,6 +178,14 @@ def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
         "nombre": d.nombre,
         "pedidos": d.pedidos,
         "cajas_pedidas": d.cajas_pedidas,
+        # Las que COMPRAS reporta como entregadas al cerrar el pedido. Es el
+        # numerador del nivel de servicio: viene lleno en el 100% de los
+        # pedidos, a diferencia de cajas_entregadas (de la cita), que sólo
+        # existe para el 4.4% que llegó a agendar una.
+        "cajas_surtidas": d.cajas_surtidas_pedido,
+        "nivel_servicio": d.pct_surtido_pedido,
+        "osa_periodo": d.osa_periodo,
+        "dias_evaluados": d.dias_evaluados,
         "pct_surtido_pedido": d.pct_surtido_pedido,
         "citas": d.citas,
         "pedidos_sin_cita": d.pedidos_sin_cita,
@@ -188,7 +196,7 @@ def _proveedores_a_dict(fu: Fuentes) -> List[dict]:
         "pct_cumplimiento": d.pct_cumplimiento,
         "pct_efectivo": d.pct_efectivo,
         "citas_incumplidas": d.citas_incumplidas,
-    } for d in desempeno_proveedores(fu)]
+    } for d in desempeno_proveedores(fu, umbral_osa)]
 
 
 def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
@@ -315,7 +323,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "por_subcausa": resumen_por_subcausa(en_alcance),
         "por_sku_tienda": por_sku,
         "detalle_dias": _detalle_dias(fu, en_alcance),
-        "proveedores": _proveedores_a_dict(fu),
+        "proveedores": _proveedores_a_dict(fu, umbral_osa),
         "citas_falladas": [{
             **f, "fecha_cita": f["fecha_cita"].isoformat() if f["fecha_cita"] else None
         } for f in citas_incumplidas(fu)],
