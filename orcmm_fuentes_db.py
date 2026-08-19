@@ -13,6 +13,7 @@ from typing import Optional
 from psycopg2.extras import RealDictCursor
 
 from orcmm_db import conectar
+from orcmm_layout_spec import ORIGEN_CENTRALIZADO
 from orcmm_pipeline import (Fuentes, _indexar_eventos, _osa_pct, _revisar_cobertura_de_citas,
                              _revisar_cobertura_de_sima, _texto, aviso_prioridad_3)
 
@@ -174,10 +175,13 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             _registrar(fu, "CEDIS_TRANSFERENCIAS", fu.transferencias,
                        ["fecha_generacion", "fecha_salida_cedis", "fecha_recepcion_tienda"])
 
-            # 7. SIMA_PEDIDOS_TIENDA — tienda directo, con lookback (0 filas hoy).
+            # 7. SIMA_PEDIDOS_TIENDA — con lookback. `origen` es quién generó
+            #    el pedido: se traen los de ESTA tienda y también los
+            #    centralizados, que resurten a la tienda aunque no los haya
+            #    generado ella (ver derivar_pedido_tienda).
             sql = ("SELECT * FROM sima_pedidos_tienda "
-                   "WHERE tienda = %s AND fecha_pedido BETWEEN %s AND %s")
-            params = [tienda, desde_eventos, hasta]
+                   "WHERE origen = ANY(%s) AND fecha_pedido BETWEEN %s AND %s")
+            params = [[tienda, ORIGEN_CENTRALIZADO], desde_eventos, hasta]
             if sku:
                 sql += " AND sku = %s"
                 params.append(sku)

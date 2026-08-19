@@ -137,7 +137,10 @@ CREATE INDEX IF NOT EXISTS ix_transferencias_cedis_origen ON cedis_transferencia
 CREATE TABLE IF NOT EXISTS sima_pedidos_tienda (
     folio                    TEXT NOT NULL,
     sku                      TEXT NOT NULL,
-    tienda                   TEXT NOT NULL,
+    -- Quién GENERÓ el pedido, no para quién es: el id de la tienda, o '300'
+    -- si lo generó el proceso central (ver ORIGEN_CENTRALIZADO). Se llamaba
+    -- `tienda` hasta la entrega del 2026-08-19.
+    origen                   TEXT NOT NULL,
     fecha_pedido             DATE NOT NULL,
     fecha_requerida          DATE,
     cantidad_pedida_piezas   INTEGER NOT NULL,
@@ -149,7 +152,7 @@ CREATE TABLE IF NOT EXISTS sima_pedidos_tienda (
     PRIMARY KEY (folio, sku)
 );
 CREATE INDEX IF NOT EXISTS ix_pedidos_tienda_fecha_pedido ON sima_pedidos_tienda (fecha_pedido);
-CREATE INDEX IF NOT EXISTS ix_pedidos_tienda_tienda ON sima_pedidos_tienda (tienda);
+CREATE INDEX IF NOT EXISTS ix_pedidos_tienda_origen ON sima_pedidos_tienda (origen);
 
 -- -------------------------------------------------------------------------
 -- 8. COMPRAS_PEDIDOS_PROV — evento, llave folio+sku

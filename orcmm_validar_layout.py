@@ -54,8 +54,9 @@ LLAVES = {
     "CITAS_PROV_CEDIS": ["folio_cita"],
 }
 
-CAMPOS_TEXTO_CLAVE = {"sku", "tienda", "cedis", "cedis_surtidor", "cedis_destino",
-                      "cedis_origen", "folio", "folio_cita", "proveedor_id"}
+CAMPOS_TEXTO_CLAVE = {"sku", "tienda", "origen", "cedis", "cedis_surtidor",
+                      "cedis_destino", "cedis_origen", "folio", "folio_cita",
+                      "proveedor_id"}
 
 
 def _texto(v) -> Optional[str]:

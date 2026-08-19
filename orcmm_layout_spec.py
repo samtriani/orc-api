@@ -203,7 +203,10 @@ HOJAS = {
         "campos": [
             ("folio", TXT, True, "", "PD-1120945"),
             ("sku", TXT, True, "", "7501059236776"),
-            ("tienda", TXT, True, "", "287"),
+            # Quién generó el pedido, no para quién es: el id de la tienda, o
+            # ORIGEN_CENTRALIZADO cuando lo generó el proceso central en vez de
+            # la tienda. Ver derivar_pedido_tienda en orcmm_pipeline.
+            ("origen", TXT, True, "Id de la tienda que pidió, o 300 si fue pedido centralizado.", "287"),
             ("fecha_pedido", FEC, True, "Cuándo se generó el pedido.", "2026-03-03"),
             ("fecha_requerida", FEC, False, "Fecha comprometida de surtido.", "2026-03-06"),
             ("cantidad_pedida_piezas", ENT, True, "", "192"),
@@ -299,8 +302,23 @@ ALIAS_ENCABEZADOS = {
         "número de pedido": "folio",
         "no. de pedido": "folio",
         "pedido": "folio",
+        # La columna se llamaba `tienda` hasta la entrega del 2026-08-19, en la
+        # que pasó a `origen` porque ya no siempre es una tienda: puede ser el
+        # proceso central. El alias deja que los archivos viejos sigan cargando.
+        "tienda": "origen",
     },
 }
+
+
+# Valor de SIMA_PEDIDOS_TIENDA.origen que NO es una tienda: el pedido lo generó
+# el proceso central, no la sucursal, y RESURTE A TODAS LAS TIENDAS — no a una
+# en particular. Confirmado con La Comer (2026-08-19).
+#
+# Que cubra a todas es lo que permite guardarlo sin decir de qué sucursal es:
+# si se tratara de un centralizado POR tienda habría que agregar esa columna a
+# sima_pedidos_tienda y a su llave, porque al cargar el archivo de dos tiendas
+# los dos "300" serían filas distintas y una pisaría a la otra.
+ORIGEN_CENTRALIZADO = "300"
 
 
 def origen_de(hoja: str) -> str:

@@ -31,17 +31,21 @@ from typing import List, Optional
 import openpyxl
 
 from orcmm_fuentes_csv import agrupar_por_hoja, leer_csv
+from orcmm_layout_spec import ORIGEN_CENTRALIZADO
 
-# Hoja del layout -> (índice de la columna con el SKU, para qué sirve la hoja).
-# El índice cambia entre hojas porque no todas empiezan por SKU: en las de
-# compras la primera columna es el folio.
+# (hoja, columna del SKU, columna por la que se filtra la tienda, descripción).
+# Los índices cambian entre hojas porque no todas empiezan por SKU: en las de
+# evento la primera columna es el folio. La columna de tienda va explícita —
+# antes se asumía que siempre era la 1, que sólo es cierto en BOPS_OSA — y va
+# en None cuando la hoja no tiene con qué filtrar por tienda.
 HOJAS = [
-    ("BOPS_OSA", 0, "OSA diario en anaquel — DE AQUÍ SALEN LOS DÍAS CON FALTANTE"),
-    ("CEDIS_INVENTARIO", 0, "Inventario diario en CEDIS"),
-    ("CEDIS_TRANSFERENCIAS", 0, "Envíos de CEDIS a tienda"),
-    ("SIMA_PEDIDOS_TIENDA", 0, "Pedidos que la tienda generó"),
-    ("COMPRAS_PEDIDOS_PROV", 1, "Pedidos a proveedor"),
-    ("CITAS_PROV_CEDIS", 2, "Citas del proveedor en CEDIS"),
+    ("BOPS_OSA", 0, 1, "OSA diario en anaquel — DE AQUÍ SALEN LOS DÍAS CON FALTANTE"),
+    ("CEDIS_INVENTARIO", 0, None, "Inventario diario en CEDIS"),
+    ("CEDIS_TRANSFERENCIAS", 0, None, "Envíos de CEDIS a tienda"),
+    # folio, sku, origen: el SKU va en la 1 y el origen en la 2.
+    ("SIMA_PEDIDOS_TIENDA", 1, 2, "Pedidos de tienda (o centralizados)"),
+    ("COMPRAS_PEDIDOS_PROV", 1, None, "Pedidos a proveedor"),
+    ("CITAS_PROV_CEDIS", 2, None, "Citas del proveedor en CEDIS"),
 ]
 
 ANCHO = 78
@@ -98,7 +102,7 @@ def _seccion_catalogo(wb, sku: str, tienda: Optional[str]) -> None:
                                 if h and v not in (None, "")))
 
 
-def _seccion_hoja(wb, hoja: str, col_sku: int, desc: str,
+def _seccion_hoja(wb, hoja: str, col_sku: int, col_tienda: Optional[int], desc: str,
                   sku: str, tienda: Optional[str]) -> int:
     _titulo(f"{hoja} — {desc}")
     if hoja not in wb.sheetnames:
@@ -112,11 +116,13 @@ def _seccion_hoja(wb, hoja: str, col_sku: int, desc: str,
             continue
         if col_sku >= len(r) or r[col_sku] is None or str(r[col_sku]) != sku:
             continue
-        # Sólo las hojas de tienda tienen columna de tienda en la posición 1;
-        # en las de compras esa posición es el proveedor, así que no se filtra.
-        if tienda and hoja in ("BOPS_OSA", "SIMA_PEDIDOS_TIENDA") \
-                and str(r[1]) != tienda:
-            continue
+        # En SIMA la columna es `origen`: un pedido centralizado no lleva el id
+        # de la tienda y aun así le resurte, así que también se conserva.
+        if tienda and col_tienda is not None and col_tienda < len(r):
+            valor = str(r[col_tienda])
+            if valor != tienda and not (hoja == "SIMA_PEDIDOS_TIENDA"
+                                        and valor == ORIGEN_CENTRALIZADO):
+                continue
         filas.append(r)
 
     if not filas:
@@ -219,8 +225,8 @@ def main() -> int:
     _seccion_catalogo(wb, sku, a.tienda)
 
     hubo_bops = False
-    for hoja, col, desc in HOJAS:
-        n = _seccion_hoja(wb, hoja, col, desc, sku, a.tienda)
+    for hoja, col, col_tda, desc in HOJAS:
+        n = _seccion_hoja(wb, hoja, col, col_tda, desc, sku, a.tienda)
         if hoja == "BOPS_OSA":
             hubo_bops = n > 0
 
