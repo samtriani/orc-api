@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import sys
 import textwrap
+import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -571,6 +572,7 @@ def leer_fuentes(paquete, umbral_osa: float = 100.0) -> Fuentes:
 
     _indexar_eventos(fu)
     _revisar_cobertura_de_citas(fu)
+    _revisar_cobertura_de_sima(fu)
 
     aviso = aviso_prioridad_3(fu)
     if aviso:
@@ -647,6 +649,36 @@ def aviso_prioridad_3(fu: Fuentes) -> Optional[str]:
     return aviso
 
 
+def _revisar_cobertura_de_sima(fu: Fuentes) -> None:
+    """Qué tan completa viene SIMA, medido contra el catálogo de la tienda.
+
+    Es el mismo chequeo que _revisar_cobertura_de_citas hace con las citas, y
+    por la misma razón: la ausencia de pedido dictamina (RC03, contra la
+    tienda), así que hay que saber ANTES de leer el Pareto si la hoja llegó
+    completa. Con la primera entrega real cubría 3.5% del catálogo.
+    """
+    if fu.vacia("SIMA_PEDIDOS_TIENDA") or fu.vacia("CATALOGO"):
+        return
+
+    con_pedido = {(s, t) for (s, t) in fu.pedidos_tienda_por}
+    del_catalogo = set(fu.catalogo)
+    cubiertos = len(con_pedido & del_catalogo)
+    if not del_catalogo:
+        return
+
+    pct = round(cubiertos / len(del_catalogo) * 100, 1)
+    if pct >= 50:
+        return
+
+    fu.advertencias.append(
+        f"SIMA_PEDIDOS_TIENDA: sólo {cubiertos:,} de {len(del_catalogo):,} SKU-tienda del "
+        f"catálogo ({pct}%) tienen algún pedido en el periodo. Los SKU que no aparecen "
+        f"quedan con el pedido de tienda INDETERMINADO —no se les puede dictaminar RC03— "
+        f"porque no se sabe si la tienda no pidió o si la extracción no los trae. "
+        f"CONFIRMAR con SIMA que la entrega cubra todos los SKU y todo el periodo: "
+        f"mientras siga parcial, la prioridad 3 explica sólo la parte cubierta.")
+
+
 def _revisar_cobertura_de_citas(fu: Fuentes) -> None:
     """La ausencia de cita dictamina contra el proveedor, así que conviene
     saber de antemano qué tan completa viene la hoja.
@@ -683,8 +715,27 @@ def _revisar_cobertura_de_citas(fu: Fuentes) -> None:
 # 2. DERIVACIÓN — de eventos con fechas a banderas del día D
 # ===========================================================================
 
-VIAS = {v.value.lower(): v for v in ViaResurtido}
-TIPOS_RESURTIDO = {t.value.lower(): t for t in TipoResurtido}
+def sin_acentos(s: str) -> str:
+    """Quita tildes y diacríticos, dejando la letra base (Á→A, ñ→n)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", s)
+                   if not unicodedata.combining(c))
+
+
+def clave_catalogo(v) -> str:
+    """Llave para emparejar un valor de CATALOGO con el vocabulario del motor.
+
+    Sin acentos y en minúsculas, porque el catálogo real NO los escribe igual
+    que el spec: el enum dice "Automático" y el sistema entrega "AUTOMATICO".
+    Medido sobre la carga real: 22,604 filas con AUTOMATICO que no empataban
+    por la tilde, y como el default manda el día a Tienda/Abasto, el modelo
+    le estaba cobrando a la TIENDA lo que le toca a COMPRAS (el resurtido
+    automático es de ellos — ver RESPONSABLE_PEDIDO_NO_GENERADO).
+    """
+    return sin_acentos(str(_texto(v) or "")).strip().lower()
+
+
+VIAS = {clave_catalogo(v.value): v for v in ViaResurtido}
+TIPOS_RESURTIDO = {clave_catalogo(t.value): t for t in TipoResurtido}
 
 
 def derivar_transito_vigente(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
@@ -708,10 +759,33 @@ def derivar_envio_generado(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
 
 
 def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
-    """Existe pedido de tienda abierto al día D."""
+    """Existe pedido de tienda abierto al día D. None = la extracción no cubre
+    este SKU, que NO es lo mismo que "la tienda no pidió".
+
+    Antes sólo se preguntaba si la hoja entera venía vacía: bastaba UNA fila de
+    SIMA para que cualquier SKU sin pedido se leyera como "no pidió" y cayera
+    en RC03. Con la entrega real eso hizo metástasis — medido sobre la carga:
+
+        tienda 403:  669 de 19,047 SKU del catálogo aparecen en SIMA (3.5%)
+                     6,756 de 6,900 SKU con faltante no aparecen -> 98% a RC03
+        tienda 287:  87 de 12,974 SKU con faltante aparecen (0.7%)
+
+    Un súper no resurte 669 claves al mes: la hoja llegó parcial. Y como RC03
+    culpa a la tienda, el modelo estaba fabricando culpables a partir de un
+    hueco de extracción.
+
+    Criterio: si el SKU no aparece NUNCA en SIMA para esa tienda, no se sabe si
+    pidió — el día queda indeterminado y lo dice. Si sí aparece, entonces la
+    extracción cubre ese SKU y la ausencia de un pedido abierto el día D sí es
+    evidencia de que no había pedido vigente. Mismo principio que
+    cedis_cubre() y que "vacío no es cero" en todo el resto del modelo.
+    """
     if fu.vacia("SIMA_PEDIDOS_TIENDA"):
         return None
-    for pedido, surtido in fu.pedidos_tienda_por.get((sku, tienda), ()):
+    eventos = fu.pedidos_tienda_por.get((sku, tienda))
+    if not eventos:
+        return None
+    for pedido, surtido in eventos:
         if pedido and pedido <= D and (surtido is None or surtido > D):
             return True
     return False
@@ -812,6 +886,7 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
     inv_cierre_descartado = 0  # días RC01 evitados: cierre>0 sin venta ni alerta
     sin_catalogo = set()      # (sku, tienda) — se reportan juntos al final
     cedis_derivado = 0        # días con existencia de CEDIS leída como cero
+    tipos_desconocidos: Counter = Counter()   # tipo_resurtido fuera del vocabulario
 
     for (sku, tienda, D), fila_osa in sorted(fu.osa.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
         osa = _osa_pct(fila_osa.get("osa_pct"))
@@ -823,9 +898,15 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             sin_catalogo.add((sku, tienda))
             via, cedis, tipo_resurtido = None, None, None
         else:
-            via = VIAS.get(str(_texto(cat.get("via_resurtido")) or "").lower())
+            via = VIAS.get(clave_catalogo(cat.get("via_resurtido")))
             cedis = _texto(cat.get("cedis_surtidor"))
-            tipo_resurtido = TIPOS_RESURTIDO.get(str(_texto(cat.get("tipo_resurtido")) or "").lower())
+            crudo_tipo = _texto(cat.get("tipo_resurtido"))
+            tipo_resurtido = TIPOS_RESURTIDO.get(clave_catalogo(crudo_tipo))
+            if crudo_tipo and tipo_resurtido is None:
+                # El catálogo trae un valor que el modelo no conoce. NO se
+                # adivina a qué responsable equivale: se cuenta y se reporta,
+                # para que La Comer diga qué significa cada uno.
+                tipos_desconocidos[crudo_tipo] += 1
 
         inv_t = fu.inv_tienda.get((sku, tienda, D))
         existencia = None
@@ -920,6 +1001,16 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             f"CERO derivada de la ausencia de fila, porque el reporte omite los SKU "
             f"sin existencia (confirmado con La Comer). Es el único lugar del modelo "
             f"donde vacío se lee como cero; se apaga con CEDIS_AUSENCIA_ES_CERO.")
+
+    if tipos_desconocidos:
+        detalle = ", ".join(f"{v} ({n:,} días)" for v, n in tipos_desconocidos.most_common(6))
+        fu.advertencias.append(
+            f"CATALOGO: {len(tipos_desconocidos)} valores de tipo_resurtido que el modelo "
+            f"no conoce — {detalle}. El vocabulario de la matriz es sólo Manual y "
+            f"Automático, así que estos días NO afinan el responsable de RC03 y caen al "
+            f"default 'Tienda / Abasto'. CONFIRMAR con La Comer a qué responsable "
+            f"equivale cada uno: si alguno es resurtido automático, hoy se le está "
+            f"cobrando a la tienda algo que le toca a Compras.")
 
     if inv_cierre_descartado:
         fu.advertencias.append(

@@ -14,7 +14,7 @@ from psycopg2.extras import RealDictCursor
 
 from orcmm_db import conectar
 from orcmm_pipeline import (Fuentes, _indexar_eventos, _osa_pct, _revisar_cobertura_de_citas,
-                             _texto, aviso_prioridad_3)
+                             _revisar_cobertura_de_sima, _texto, aviso_prioridad_3)
 
 # Los 4 eventos (transferencias, pedidos de tienda, pedidos a proveedor,
 # citas) se extraen ~un mes antes de la ventana de análisis en el flujo de
@@ -221,6 +221,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
 
     _indexar_eventos(fu)
     _revisar_cobertura_de_citas(fu)
+    _revisar_cobertura_de_sima(fu)
 
     aviso = aviso_prioridad_3(fu)
     if aviso:
