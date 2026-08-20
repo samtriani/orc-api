@@ -45,7 +45,10 @@ from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
                                resumen_por_subcausa)
 
 AMARILLO, GRIS, AZUL, AMBAR, VERDE, ROJO = "FFE600", "F2F2F2", "DDEBF7", "FFEB9C", "C6EFCE", "FFC7CE"
-COLOR_CAUSA = {"RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
+# Fuera de alcance: lila pálido. No puede ser otro gris — junto al de
+# RC99 no se distinguirían, que es justo lo que se quiere separar.
+LILA = "E6E0F0"
+COLOR_CAUSA = {"RC00": LILA, "RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
                "RC04": AMBAR, "RC05": ROJO, "RC06": ROJO, "RC99": GRIS}
 
 NEGRITA = Font(bold=True)
@@ -1714,8 +1717,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
             "regla_matriz_para_entrega_completa_con_cedis_en_cero":
                 "Decisión de negocio — la matriz no cubre CEDIS en cero con entrega completa",
             FUERA_DE_CATALOGO:
-                "BOPS — SKU que el catálogo de la tienda no reconoce. No es un dato "
-                "faltante: son días fuera del alcance del análisis",
+                "BOPS — SKU de una división que este análisis no cubre. BOPS entrega todas las divisiones y el catálogo sólo trae Abarrotes. No es un dato faltante: son días fuera del alcance",
         }
         for campo, n in cob["campos_que_bloquean"].items():
             ws.cell(row=f, column=2, value=campo).font = Font(name="Consolas", size=10)
@@ -1826,7 +1828,7 @@ def main() -> int:
         print(f"\nOSA del periodo (SKU del catálogo): {cob['osa_alcance']}%")
         if cob["casos_fuera_de_alcance"] and cob["osa_general"] != cob["osa_alcance"]:
             print(f"OSA sobre todo lo que entregó BOPS: {cob['osa_general']}% "
-                  f"— mezcla SKU que el catálogo no reconoce")
+                  f"— mezcla divisiones que el análisis no cubre")
 
     agua = waterfall_osa(fu, diagnosticos)
     if agua["escalones"]:

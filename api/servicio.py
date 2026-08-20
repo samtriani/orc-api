@@ -57,8 +57,7 @@ DE_QUIEN = {
     "regla_matriz_para_entrega_completa_con_cedis_en_cero":
         "Decisión de negocio — la matriz no cubre CEDIS en cero con entrega completa",
     FUERA_DE_CATALOGO:
-        "BOPS — SKU que el catálogo de la tienda no reconoce. No es un dato "
-        "faltante: son días fuera del alcance del análisis",
+        "BOPS — SKU de una división que este análisis no cubre. BOPS entrega todas las divisiones y el catálogo sólo trae Abarrotes. No es un dato faltante: son días fuera del alcance",
 }
 
 

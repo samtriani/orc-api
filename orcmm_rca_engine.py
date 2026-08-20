@@ -63,6 +63,8 @@ class SubcausaProveedor(str, Enum):
     capacidad o de asignación del proveedor; la tercera es incumplimiento puro.
     """
     SIN_CITA = "Nunca agendó cita para el pedido"
+    CROSSDOCK_PEDIDO_TARDE = ("Entrega completa en crossdock; el pedido se "
+                              "generó tarde para cubrir el consumo")
     CITA_PENDIENTE = "Cita agendada para después del día del faltante"
     RECORTE_EN_CITA = "Confirmó en cita menos cajas de las pedidas"
     NO_SE_PRESENTO = "Cita vencida sin entrega"
@@ -101,6 +103,19 @@ class SubcausaEjecucionTienda(str, Enum):
 # cifras: sobre el alcance y sobre todo lo que llegó. No se descartan — que
 # BOPS mande SKU de más es justamente lo que hay que corregir en el origen.
 FUERA_DE_CATALOGO = "sku_fuera_del_catalogo_de_la_tienda"
+
+# Código propio para los días fuera de alcance, separado de RC99.
+#
+# No son lo mismo y mezclarlos miente: RC99 es "el modelo no supo explicarlo"
+# —una deuda del análisis— y esto es "no le tocaba explicarlo", porque BOPS
+# entregó un SKU que el catálogo de la tienda no reconoce. En la corrida de
+# Coyoacán eran 145,645 días contra 30,245 de RC99 real: el reporte diario
+# enseñaba 175,890 "Sin clasificar" y el 83% no era culpa del modelo.
+#
+# No entra al Pareto ni a la cobertura —eso ya lo filtraba dentro_del_alcance—
+# pero sí aparece en la clasificación diaria, que es donde se auditan.
+RC00_FUERA_DE_ALCANCE = "RC00"
+CAUSA_FUERA_DE_ALCANCE = "Fuera de alcance · división no analizada"
 
 
 class TipoResurtido(str, Enum):
@@ -187,6 +202,22 @@ RESPONSABLE_SIN_CITA = Responsable.PROVEEDOR
 #   True  -> se dictamina RC05 / Compras-Abasto con subcausa CITA_PENDIENTE
 #   False -> se reporta como hueco de la matriz y el día queda sin clasificar
 CLASIFICAR_CITA_PENDIENTE = True
+
+# Entrega completa del proveedor y aun así CEDIS amaneció en cero.
+#
+# Era el último hueco de la matriz. La explicación la dio Compras: en TODOS
+# esos casos el proveedor entregó completo y a tiempo, pero el mismo día que
+# entregó al CEDIS éste hizo crossdock — en Vía 2 el CEDIS no resguarda
+# inventario, así que amanecer en cero es lo normal, no una falla.
+#
+# No es culpa del proveedor ni del CEDIS: el pedido se generó tarde para
+# cubrir el consumo. Con más antelación no se habría llegado al desabasto.
+# Mismo razonamiento y mismo responsable que CLASIFICAR_CITA_PENDIENTE.
+#
+# SÓLO aplica a Vía 2. En Vía 1 el CEDIS sí debe resguardar, así que entrega
+# completa con CEDIS en cero es otra pregunta —qué pasó con lo que recibió— y
+# se deja como hueco de la matriz en vez de dictaminarla por analogía.
+CLASIFICAR_ENTREGA_COMPLETA_CEDIS_CERO = True
 
 # ¿A quién le cae un pedido de tienda que nunca se generó (RC03, prioridad 3)?
 # Depende de quién debía generarlo, y eso lo dice CATALOGO.tipo_resurtido:
@@ -374,10 +405,14 @@ class Regla:
 class R0_DentroDelCatalogo(Regla):
     """Prioridad 0 — el SKU tiene que estar en el catálogo de esa tienda.
 
-    No es una regla de la matriz: es el filtro de alcance. Un SKU que el
-    catálogo de la tienda no reconoce no se puede clasificar con este árbol
-    —no hay vía de resurtido ni CEDIS surtidor que consultar— y sobre todo no
-    debería contarse contra la cobertura del modelo. Ver FUERA_DE_CATALOGO.
+    No es una regla de la matriz: es el filtro de alcance.
+
+    BOPS entrega TODAS las divisiones de la tienda y el catálogo cubre sólo
+    Abarrotes (confirmado con La Comer). Un SKU de otra división no se puede
+    clasificar con este árbol —sin catálogo no hay vía de resurtido ni CEDIS
+    surtidor que consultar— y sobre todo no debería contarse contra la
+    cobertura: no es que el modelo no supiera, es que no le tocaba. En
+    Coyoacán son 17,567 SKU y 145,645 días. Ver FUERA_DE_CATALOGO.
     """
     prioridad = 0
 
@@ -638,9 +673,33 @@ class R7_R8_RamaProveedorCedis(Regla):
 
         # Mismo hueco de la matriz que en la ruta sin citas: el proveedor
         # entregó todo lo pedido y aun así CEDIS amaneció en cero.
+        evidencia = base + ["Entrega completa contra la cita, pero inventario CEDIS = 0"]
+        dictamen = self._entrega_completa_cedis_cero(ev, evidencia)
+        if dictamen is not None:
+            return dictamen
         return Indeterminado(
-            8, ["regla_matriz_para_entrega_completa_con_cedis_en_cero"],
-            base + ["Entrega completa contra la cita, pero inventario CEDIS = 0"],
+            8, ["regla_matriz_para_entrega_completa_con_cedis_en_cero"], evidencia,
+        )
+
+
+    def _entrega_completa_cedis_cero(self, ev, evidencia):
+        """Dictamen del hueco de entrega completa con CEDIS en cero.
+
+        Devuelve None cuando no aplica —está apagado, o el SKU no es Vía 2— y
+        entonces el caso sigue saliendo como hueco de la matriz, que es lo
+        honesto: no se dictamina por analogía algo que no se verificó.
+        """
+        if not CLASIFICAR_ENTREGA_COMPLETA_CEDIS_CERO:
+            return None
+        if ev.via_resurtido is not ViaResurtido.VIA_2:
+            return None
+        return Dictamen(
+            8, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
+            "Citas proveedor a CEDIS",
+            evidencia + ["Vía 2 (crossdock): el CEDIS no resguarda inventario, "
+                         "así que el cero es normal. El pedido se generó tarde "
+                         "para cubrir el consumo"],
+            subcausa=SubcausaProveedor.CROSSDOCK_PEDIDO_TARDE,
         )
 
     # -- prioridad 8 original, sin hoja de citas ---------------------------
@@ -667,10 +726,14 @@ class R7_R8_RamaProveedorCedis(Regla):
 
         # Brecha de la matriz: CEDIS en cero pese a entrega completa del
         # proveedor. Ninguna de las 10 reglas cubre este caso.
+        evidencia = base + [f"Entrega completa: {entregadas}/{pedidas} cajas, "
+                            f"pero inventario CEDIS = 0"]
+        dictamen = self._entrega_completa_cedis_cero(ev, evidencia)
+        if dictamen is not None:
+            return dictamen
         return Indeterminado(
             self.prioridad, ["regla_matriz_para_entrega_completa_con_cedis_en_cero"],
-            base + [f"Entrega completa: {entregadas}/{pedidas} cajas, "
-                    f"pero inventario CEDIS = 0"],
+            evidencia,
         )
 
 
@@ -777,8 +840,14 @@ class MotorRCA:
             "osa": ev.osa,
             "venta_perdida": ev.venta_perdida,
             "clasificado": False,
-            "root_cause_id": "RC99",
-            "causa_raiz": CausaRaiz.RC99.value,
+            # Un día fuera de catálogo no es "no supimos": es "no nos tocaba".
+            # Lleva código propio para que el reporte diario no los sume al
+            # Sin clasificar. Ver RC00_FUERA_DE_ALCANCE.
+            "root_cause_id": (RC00_FUERA_DE_ALCANCE
+                              if FUERA_DE_CATALOGO in i.campos_faltantes else "RC99"),
+            "causa_raiz": (CAUSA_FUERA_DE_ALCANCE
+                           if FUERA_DE_CATALOGO in i.campos_faltantes
+                           else CausaRaiz.RC99.value),
             "responsable": Responsable.PENDIENTE.value,
             "subcausa": None,
             "prioridad_regla": i.prioridad,
