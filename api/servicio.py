@@ -37,6 +37,7 @@ from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
                                dentro_del_alcance, diagnosticar_periodo,
                                resumen_por_causa, resumen_por_responsable,
                                resumen_por_subcausa)
+from orcmm_fuentes_db import _avisar                            # noqa: E402
 from orcmm_validar_layout import validar_archivo                # noqa: E402
 
 # A quién pedirle el dato que bloqueó la clasificación. Misma tabla que usa la
@@ -248,7 +249,7 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
 
 
 def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
-             csvs=None, fu: Optional[Fuentes] = None) -> dict:
+             csvs=None, fu: Optional[Fuentes] = None, avisar=None) -> dict:
     """Corre el pipeline completo y devuelve el resumen que ve la pantalla.
 
     Es la misma pasada que produce el Excel: se lee una vez, se clasifica una
@@ -259,6 +260,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
     `csvs` se ignoran — todo lo de aquí en adelante sólo lee de `Fuentes`.
     """
     fu = fu or leer_fuentes(PaqueteFuentes.desde(ruta, csvs or []), umbral_osa)
+    _avisar(avisar, "derivando la evidencia de cada día")
     evidencias = derivar_evidencias(fu, umbral_osa)
 
     if not evidencias:
@@ -273,7 +275,9 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
             "aviso_parcial": aviso_prioridad_3(fu),
         }
 
+    _avisar(avisar, "clasificando por causa raíz")
     diagnosticos = clasificar(evidencias)
+    _avisar(avisar, "generando el Excel de resultados")
     cob, _ = escribir_resultado(salida, fu, evidencias, diagnosticos, umbral_osa)
 
     # El Pareto y el detalle por SKU van sobre el alcance; la cobertura sigue

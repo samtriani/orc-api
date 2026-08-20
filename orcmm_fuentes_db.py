@@ -99,9 +99,22 @@ def _registrar(fu: Fuentes, hoja: str, filas: list, campos_fecha) -> None:
         fu.advertencias.append(f"{hoja}: sin filas para esta tienda y periodo.")
 
 
+def _avisar(avisar, etapa: str) -> None:
+    """Reporta la fase actual, si quien llamó pasó por dónde avisar.
+
+    Nunca revienta: un fallo contando el avance no puede tumbar el análisis.
+    """
+    if avisar is None:
+        return
+    try:
+        avisar(etapa)
+    except Exception:
+        pass
+
+
 def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                      umbral_osa: float = 100.0, dsn: Optional[str] = None,
-                     sku: Optional[str] = None) -> Fuentes:
+                     sku: Optional[str] = None, avisar=None) -> Fuentes:
     """Con `sku`, todas las consultas se acotan a ese SKU además de la
     tienda — lo usa orcmm_expediente_db para el detalle diario de un solo
     producto. Con un solo SKU el volumen es mínimo, así que
@@ -124,6 +137,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             cur.execute(sql, params)
             cedis_ids = [r["cedis_surtidor"] for r in cur.fetchall() if r["cedis_surtidor"]]
 
+            _avisar(avisar, "leyendo catálogo")
             # 1. CATALOGO — estático, sin fecha.
             sql = "SELECT * FROM catalogo WHERE tienda = %s"
             params = [tienda]
@@ -137,6 +151,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             fu.conteo["CATALOGO"] = len(filas)
             fu.rango["CATALOGO"] = (None, None)
 
+            _avisar(avisar, "leyendo BOPS (días con faltante)")
             # 2. BOPS_OSA — define qué días entran al análisis. Se lee ANTES
             #    de inv_tienda/ventas a propósito: de aquí sale la lista de
             #    (sku, fecha) con faltante real, que es lo único que hace
@@ -160,6 +175,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                     skus_faltante.append(f["sku"])
                     fechas_faltante.append(f["fecha"])
 
+            _avisar(avisar, "leyendo inventario de tienda y ventas")
             # 3. TABLEAU_INV_TIENDA / TABLEAU_VENTAS.
             if sku:
                 # Un solo SKU: volumen mínimo, se trae el rango completo
@@ -207,6 +223,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                 fu.ventas[(_texto(f["sku"]), _texto(f["tienda"]), f["fecha"])] = f
             _registrar(fu, "TABLEAU_VENTAS", filas, "fecha")
 
+            _avisar(avisar, "leyendo inventario de CEDIS")
             # 5. CEDIS_INVENTARIO — scoped por cedis, no por tienda.
             filas = []
             if cedis_ids:
@@ -224,6 +241,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             for (_, cedis, d) in fu.inv_cedis:
                 fu.dias_cedis.setdefault(cedis, set()).add(d)
 
+            _avisar(avisar, "leyendo transferencias de CEDIS")
             # 6. CEDIS_TRANSFERENCIAS — tienda_destino directo, con lookback.
             sql = (f"SELECT {_cols('CEDIS_TRANSFERENCIAS')} FROM cedis_transferencias "
                    "WHERE tienda_destino = %s AND fecha_generacion BETWEEN %s AND %s")
@@ -236,6 +254,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             _registrar(fu, "CEDIS_TRANSFERENCIAS", fu.transferencias,
                        ["fecha_generacion", "fecha_salida_cedis", "fecha_recepcion_tienda"])
 
+            _avisar(avisar, "leyendo pedidos de tienda (SIMA)")
             # 7. SIMA_PEDIDOS_TIENDA — con lookback. `origen` es quién generó
             #    el pedido: se traen los de ESTA tienda y también los
             #    centralizados, que resurten a la tienda aunque no los haya
@@ -251,6 +270,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             _registrar(fu, "SIMA_PEDIDOS_TIENDA", fu.pedidos_tienda,
                        ["fecha_pedido", "fecha_surtido"])
 
+            _avisar(avisar, "leyendo pedidos a proveedor")
             # 8. COMPRAS_PEDIDOS_PROV — cedis_destino, no tienda, con lookback.
             fu.pedidos_prov = []
             if cedis_ids:
@@ -265,6 +285,7 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             _registrar(fu, "COMPRAS_PEDIDOS_PROV", fu.pedidos_prov,
                        ["fecha_pedido", "fecha_recibo"])
 
+            _avisar(avisar, "leyendo citas de proveedor")
             # 9. CITAS_PROV_CEDIS — cedis_destino, no tienda, con lookback.
             fu.citas_prov = []
             if cedis_ids:

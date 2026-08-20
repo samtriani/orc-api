@@ -111,6 +111,9 @@ class Trabajo:
     # espera al tiempo de análisis y decía "llevo 193 s trabajando" cuando la
     # verdad era "llevo 193 s formado".
     iniciado: Optional[float] = None
+    # En qué fase va. Sin esto el poll dice "corriendo" durante minutos y
+    # cuando algo falla no se sabe ni dónde murió.
+    etapa: Optional[str] = None
     futuro: Optional[Future] = None
     cancelado: bool = False
 
@@ -416,10 +419,13 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
     if not _tomar_turno(id_):                 # lo cancelaron mientras hacia cola
         return
     try:
-        fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa)
+        def marcar(etapa: str) -> None:
+            trabajo.etapa = etapa
+
+        fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa, avisar=marcar)
         trabajo.nombre_descarga = f"Resultado RCA - tienda {tienda}.xlsx"
         salida = trabajo.carpeta / "resultado.xlsx"
-        resumen = analizar(None, salida, umbral_osa, fu=fu)
+        resumen = analizar(None, salida, umbral_osa, fu=fu, avisar=marcar)
 
         # El front espera 'validacion'/'correccion' siempre presentes (mismas
         # claves que _correr ya manda) — aquí van vacías porque no hay
@@ -571,6 +577,8 @@ def estado_analisis(id_: str) -> dict:
         # contador de un trabajo formado no mide trabajo, mide espera.
         en_cola = trabajo.iniciado is None
         cuerpo["fase"] = "en_cola" if en_cola else "corriendo"
+        if trabajo.etapa and not en_cola:
+            cuerpo["etapa"] = trabajo.etapa
         cuerpo["segundos"] = round(time.time() - (trabajo.iniciado or trabajo.creado), 1)
         if en_cola:
             cuerpo["delante"] = sum(
