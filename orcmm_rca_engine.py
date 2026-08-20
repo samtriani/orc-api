@@ -125,29 +125,23 @@ CAUSA_FUERA_DE_ALCANCE = "Fuera de alcance · división no analizada"
 # ===========================================================================
 # EXCLUIR DEL ALCANCE LOS SKU QUE SIMA NO TRAE   (2026-08-20)
 #
-# Un SKU del catálogo sin NINGÚN pedido en SIMA no se puede evaluar en la
-# prioridad 3: no se sabe si la tienda pidió. Antes esos días salían RC99 y
-# eran el 68% del Pareto — 29,982 de 43,821 en Coyoacán —, con lo que la
-# gráfica de OSA quedaba dominada por una barra que no dice nada del negocio.
+# APAGADO. Se construyó cuando parecía que SIMA venía incompleta y los SKU sin
+# pedido llenaban el Pareto de RC99. La Comer confirmó que la extracción está
+# completa: si un SKU del catálogo no aparece en SIMA es porque la tienda NO
+# lo pidió en el periodo. Eso es evidencia, no un hueco — el día se clasifica
+# como RC03 y ya no hay nada que excluir. Ver derivar_pedido_tienda.
 #
-# En True se sacan del alcance, como los que no están en el catálogo: no
-# entran al Pareto, ni al waterfall, ni a la cobertura, ni al denominador del
-# OSA. Siguen en la clasificación diaria, que es donde se auditan.
+# Se deja el interruptor porque el mecanismo sigue siendo correcto para el
+# caso que sí lo justifica: una entrega parcial. En True, los SKU sin ningún
+# pedido salen del alcance —no entran al Pareto, ni al waterfall, ni a la
+# cobertura, ni al denominador del OSA— y el resultado reporta cuántos se
+# dejaron fuera, para que el front lo diga.
 #
-# LO QUE ESTO CUESTA, y por eso el front DEBE decirlo:
-#
-#   Estos SKU no están fuera de alcance de verdad. Están en el catálogo,
-#   activos, y son Vía 2 — o sea que el pedido de tienda a CEDIS SÍ debía
-#   existir. No es que no les tocara: es que falta el dato. Excluirlos sube
-#   la cobertura a ~98% pero medida sobre los días que sobrevivieron, y deja
-#   el Pareto calculado sobre los SKU que sí tienen pedido, que probablemente
-#   son los de más rotación. Es sesgo de selección, asumido a propósito.
-#
-#   Por eso el resultado reporta cuántos SKU y días se excluyeron: sin ese
-#   letrero a la vista, el número miente por omisión.
-#
-# Se apaga poniendo False, cuando SIMA entregue completo.
-EXCLUIR_SKU_SIN_SIMA = True
+# Ojo si se vuelve a prender: sube la cobertura a costa de achicar el
+# universo, y el Pareto queda calculado sobre los SKU que sí tienen pedido,
+# que suelen ser los de más rotación. Es sesgo de selección, y sin el letrero
+# a la vista el resultado miente por omisión.
+EXCLUIR_SKU_SIN_SIMA = False
 
 SIN_DATO_SIMA = "sku_sin_pedidos_en_sima"
 CAUSA_SIN_DATO_SIMA = "Fuera de alcance · sin datos de SIMA"

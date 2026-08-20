@@ -757,12 +757,13 @@ def _revisar_cobertura_de_sima(fu: Fuentes) -> None:
         return
 
     fu.advertencias.append(
-        f"SIMA_PEDIDOS_TIENDA: sólo {cubiertos:,} de {len(del_catalogo):,} SKU-tienda del "
-        f"catálogo ({pct}%) tienen algún pedido en el periodo. Los SKU que no aparecen "
-        f"quedan con el pedido de tienda INDETERMINADO —no se les puede dictaminar RC03— "
-        f"porque no se sabe si la tienda no pidió o si la extracción no los trae. "
-        f"CONFIRMAR con SIMA que la entrega cubra todos los SKU y todo el periodo: "
-        f"mientras siga parcial, la prioridad 3 explica sólo la parte cubierta.")
+        f"SIMA_PEDIDOS_TIENDA: {cubiertos:,} de {len(del_catalogo):,} SKU-tienda del catálogo "
+        f"({pct}%) tienen algún pedido en el periodo. Los {len(del_catalogo) - cubiertos:,} "
+        f"restantes se dictaminan como RC03 'Pedido de tienda no generado', porque La Comer "
+        f"confirmó que la extracción viene completa y por lo tanto no aparecer significa que "
+        f"la tienda NO pidió. VERIFICAR que siga siendo cierto en esta entrega: si llegara "
+        f"recortada, esos días le cobrarían a la tienda un hueco de extracción y RC03 se "
+        f"inflaría sin que nada más lo delate.")
 
 
 def _revisar_cobertura_de_citas(fu: Fuentes) -> None:
@@ -845,26 +846,29 @@ def derivar_envio_generado(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
 
 
 def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
-    """Existe pedido de tienda abierto al día D. None = la extracción no cubre
-    este SKU, que NO es lo mismo que "la tienda no pidió".
+    """Existe pedido de tienda abierto al día D.
 
-    Antes sólo se preguntaba si la hoja entera venía vacía: bastaba UNA fila de
-    SIMA para que cualquier SKU sin pedido se leyera como "no pidió" y cayera
-    en RC03. Con la entrega real eso hizo metástasis — medido sobre la carga:
+    La ausencia en SIMA es EVIDENCIA de que no se pidió, no un hueco de datos.
+    Confirmado con La Comer (2026-08-20): la extracción viene completa, así que
+    un SKU del catálogo que no aparece es un SKU que la tienda no pidió en el
+    periodo. Por eso devuelve False y el día cae en RC03.
 
-        tienda 403:  669 de 19,047 SKU del catálogo aparecen en SIMA (3.5%)
-                     6,756 de 6,900 SKU con faltante no aparecen -> 98% a RC03
-        tienda 287:  87 de 12,974 SKU con faltante aparecen (0.7%)
+    Esto estuvo al revés entre el 19 y el 20 de agosto. Con la primera entrega
+    de SIMA sólo el 0.7% de los SKU con faltante tenía pedido, y un súper no
+    resurte 600 claves al mes: parecía extracción parcial, así que la ausencia
+    se leía como "no sé" para no fabricar culpables. La segunda entrega —de
+    5,707 filas a 57,024, con los pedidos centralizados incluidos— y la
+    confirmación de La Comer cerraron la duda: la hoja sí venía completa; lo
+    que faltaba eran los centralizados y el resto del periodo.
 
-    Un súper no resurte 669 claves al mes: la hoja llegó parcial. Y como RC03
-    culpa a la tienda, el modelo estaba fabricando culpables a partir de un
-    hueco de extracción.
+    QUÉ IMPLICA, porque no es menor: el modelo ahora AFIRMA "la tienda no
+    pidió" para decenas de miles de días. Se sostiene sobre la palabra del
+    dueño del dato, no sobre lo que el archivo demuestra por sí solo — si una
+    entrega futura llegara recortada, RC03 se inflaría en silencio y le
+    cobraría a la tienda un hueco de extracción. _revisar_cobertura_de_sima
+    mide justamente eso y avisa.
 
-    Criterio: si el SKU no aparece NUNCA en SIMA para esa tienda, no se sabe si
-    pidió — el día queda indeterminado y lo dice. Si sí aparece, entonces la
-    extracción cubre ese SKU y la ausencia de un pedido abierto el día D sí es
-    evidencia de que no había pedido vigente. Mismo principio que
-    cedis_cubre() y que "vacío no es cero" en todo el resto del modelo.
+    None sólo cuando la hoja entera viene vacía: ahí no hay nada que afirmar.
     """
     if fu.vacia("SIMA_PEDIDOS_TIENDA"):
         return None
@@ -881,8 +885,6 @@ def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     # igual en vez de duplicarla.
     eventos = list(fu.pedidos_tienda_por.get((sku, tienda), ()))
     eventos += fu.pedidos_tienda_por.get((sku, ORIGEN_CENTRALIZADO), ())
-    if not eventos:
-        return None
     for pedido, surtido in eventos:
         if pedido and pedido <= D and (surtido is None or surtido > D):
             return True
