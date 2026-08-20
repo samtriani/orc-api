@@ -86,6 +86,51 @@ def _cols(hoja: str, alias: str = "") -> str:
 
 
 
+def _conteos_de_la_hoja(cur, tienda, cedis_ids, desde, hasta, desde_eventos) -> dict:
+    """Cuántas filas tiene cada hoja para la tienda y el periodo, SIN filtrar
+    por SKU.
+
+    Existe por el expediente. Cuando leer_fuentes_db se acota a un SKU, todas
+    las consultas llevan `AND sku = %s`, así que una hoja que sí tiene datos
+    llega vacía si ESE SKU no aparece en ella. Y `Fuentes.vacia()` —que es lo
+    que cinco reglas usan para decidir entre "no" y "no sé"— leería esa hoja
+    como inexistente.
+
+    El efecto era que el expediente contradecía al análisis: el mismo día que
+    el reporte clasifica como RC03 "no se generó el pedido", la gráfica lo
+    pintaba RC99 "sin clasificar", porque el SKU no tenía filas en SIMA y la
+    hoja parecía no haber llegado. Lo mismo aplica a transferencias, compras,
+    citas y catálogo.
+
+    Con esto `conteo` dice si la HOJA llegó, que es la pregunta que las reglas
+    quieren hacer, mientras las listas siguen trayendo sólo el SKU pedido.
+    """
+    conteos = {}
+    cur.execute("SELECT count(*) AS n FROM catalogo WHERE tienda = %s", (tienda,))
+    conteos["CATALOGO"] = cur.fetchone()["n"]
+
+    cur.execute("SELECT count(*) AS n FROM cedis_transferencias "
+                "WHERE tienda_destino = %s AND fecha_generacion BETWEEN %s AND %s",
+                (tienda, desde_eventos, hasta))
+    conteos["CEDIS_TRANSFERENCIAS"] = cur.fetchone()["n"]
+
+    cur.execute("SELECT count(*) AS n FROM sima_pedidos_tienda "
+                "WHERE origen = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
+                ([tienda, ORIGEN_CENTRALIZADO], desde_eventos, hasta))
+    conteos["SIMA_PEDIDOS_TIENDA"] = cur.fetchone()["n"]
+
+    if cedis_ids:
+        cur.execute("SELECT count(*) AS n FROM compras_pedidos_prov "
+                    "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
+                    (cedis_ids, desde_eventos, hasta))
+        conteos["COMPRAS_PEDIDOS_PROV"] = cur.fetchone()["n"]
+        cur.execute("SELECT count(*) AS n FROM citas_prov_cedis "
+                    "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
+                    (cedis_ids, desde_eventos, hasta))
+        conteos["CITAS_PROV_CEDIS"] = cur.fetchone()["n"]
+    return conteos
+
+
 def _registrar(fu: Fuentes, hoja: str, filas: list, campos_fecha) -> None:
     """Igual que el `registrar` interno de leer_fuentes: conteo y rango
     salen de lo efectivamente leído, no de los límites de la consulta — así
@@ -267,8 +312,24 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             for f in filas:
                 fu.inv_cedis[(_texto(f["sku"]), _texto(f["cedis"]), f["fecha"])] = f
             _registrar(fu, "CEDIS_INVENTARIO", filas, "fecha")
-            for (_, cedis, d) in fu.inv_cedis:
-                fu.dias_cedis.setdefault(cedis, set()).add(d)
+            if sku:
+                # Mismo problema que el conteo de las hojas: dias_cedis
+                # responde "¿la extracción trae ese día?" y armarlo desde
+                # filas ya filtradas por SKU convierte "este producto no
+                # tenía fila ese día" en "ese día no se extrajo". Con eso
+                # CEDIS_AUSENCIA_ES_CERO deja de aplicar, la existencia queda
+                # en None y el día sale RC99 en el expediente aunque el
+                # análisis completo lo clasifique. Se pregunta sin el filtro:
+                # son a lo más un puñado de fechas por CEDIS.
+                if cedis_ids:
+                    cur.execute("SELECT DISTINCT cedis, fecha FROM cedis_inventario "
+                                "WHERE cedis = ANY(%s) AND fecha BETWEEN %s AND %s",
+                                (cedis_ids, desde, hasta))
+                    for f in cur.fetchall():
+                        fu.dias_cedis.setdefault(_texto(f["cedis"]), set()).add(f["fecha"])
+            else:
+                for (_, cedis, d) in fu.inv_cedis:
+                    fu.dias_cedis.setdefault(cedis, set()).add(d)
 
             _avisar(avisar, "leyendo transferencias de CEDIS")
             # 6. CEDIS_TRANSFERENCIAS — tienda_destino directo, con lookback.
@@ -327,6 +388,12 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                 cur.execute(sql, params)
                 fu.citas_prov = cur.fetchall()
             _registrar(fu, "CITAS_PROV_CEDIS", fu.citas_prov, ["fecha_pedido", "fecha_cita"])
+            # Con `sku`, el conteo de cada hoja se recalcula sin ese filtro:
+            # las reglas preguntan si la HOJA llegó, no si el SKU aparece en
+            # ella. Ver _conteos_de_la_hoja.
+            if sku:
+                fu.conteo.update(_conteos_de_la_hoja(
+                    cur, tienda, cedis_ids, desde, hasta, desde_eventos))
     finally:
         conn.close()
 
