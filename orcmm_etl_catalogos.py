@@ -14,6 +14,8 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import csv
+import re
 import sys
 import time
 from pathlib import Path
@@ -24,6 +26,7 @@ from dotenv import load_dotenv
 
 from orcmm_db import (conectar, registrar_carga_fin, registrar_carga_inicio,
                        upsert_lote)
+from orcmm_fuentes_csv import detectar_delimitador, detectar_encoding
 from orcmm_pipeline import _decimal, _entero, _fecha, _texto
 
 TAMANO_LOTE = 5000
@@ -58,6 +61,21 @@ def _codigo(v) -> Optional[str]:
 # traen "Línea"/"Vía" en absoluto. Por eso se empareja por NOMBRE con alias
 # (mismo criterio que orcmm_layout_spec.ALIAS_ENCABEZADOS), no por posición
 # fija — sólo sku/tienda son obligatorios, el resto que falte queda NULL.
+def _sin_prefijo(v) -> Optional[str]:
+    """Quita el prefijo numérico de la jerarquía comercial.
+
+    Las entregas viejas traían "1 - ABARROTES" y "13 - VINOS Y LICORES (MAS
+    DE 20 GL)"; la nueva trae el texto limpio. Sin normalizar, el MISMO valor
+    aparecería dos veces en el filtro —una con número y otra sin— que es peor
+    que cualquiera de las dos formas.
+
+    El patrón exige dígitos, espacios, guion y espacios al inicio, para no
+    morder un nombre que legítimamente empiece con número ("7 UP SABOR...").
+    """
+    t = _texto(v)
+    return re.sub(r"^\s*\d+\s*-\s*", "", t) if t else t
+
+
 ALIAS_SUCURSALES = {
     "formato": "formato",
     "no. tienda": "tienda",
@@ -81,8 +99,15 @@ ALIAS_SKU_TIENDA = {
     "código de barras": "sku",
     "artículo nombre": "articulo_nombre",
     "división": "division",
+    "descripción": "articulo_nombre",
     "grupo sección": "grupo_seccion",
+    "sección": "grupo_seccion",
+    "categoría": "categoria",
+    "subcategoría": "subcategoria",
+    "id proveedor": "proveedor_id",
+    "proveedor": "proveedor_nombre",
     "proveedor nombre": "proveedor_nombre",
+    "marca": "marca",
     "resurtido tipo": "resurtido_tipo",
     "resurtido frec": "resurtido_frec",
     "unidades de empaque": "unidades_empaque",
@@ -94,20 +119,51 @@ ALIAS_SKU_TIENDA = {
 }
 CONVERTIDORES_SKU_TIENDA = {
     "fecha_inicial": _fecha, "tienda": _codigo, "tienda_nombre": _texto, "sku": _codigo,
-    "articulo_nombre": _texto, "division": _texto, "grupo_seccion": _texto,
+    "articulo_nombre": _texto, "division": _sin_prefijo, "grupo_seccion": _sin_prefijo,
+    "categoria": _sin_prefijo, "subcategoria": _sin_prefijo,
+    "proveedor_id": _codigo, "marca": _texto,
     "proveedor_nombre": _texto, "resurtido_tipo": _texto, "resurtido_frec": _texto,
     "unidades_empaque": _entero_na, "resurtido": _entero_na, "catalogo_activo": _entero_na,
     "linea_io": _texto, "via_resurtido": _texto,
 }
 REQUERIDOS_SKU_TIENDA = {"sku", "tienda"}
 COLUMNAS_BD_SKU_TIENDA = ["sku", "tienda", "tienda_nombre", "articulo_nombre", "division",
-                          "grupo_seccion", "proveedor_nombre", "resurtido_tipo", "resurtido_frec",
+                          "grupo_seccion", "categoria", "subcategoria",
+                          "proveedor_id", "proveedor_nombre", "marca",
+                          "resurtido_tipo", "resurtido_frec",
                           "unidades_empaque", "resurtido", "catalogo_activo", "linea_io",
                           "via_resurtido", "fecha_inicial"]
 
 
 def _normalizar(s) -> str:
     return " ".join(str(s or "").split()).strip().lower()
+
+
+def _filas_crudas(ruta: Path):
+    """(encabezado, filas) de un .xlsx o un .csv.
+
+    El catálogo comercial llega como CSV y el resto de los catálogos como
+    Excel, así que se resuelve por extensión en vez de pedir que todos
+    vengan en el mismo formato.
+
+    Para el CSV se reutiliza la detección de `orcmm_fuentes_csv`: los
+    archivos de La Comer salen en UTF-16 con BOM y a veces separados por
+    TAB, así que asumir "UTF-8 con comas" falla en silencio — el archivo se
+    lee como una sola columna de basura y las obligatorias "faltan".
+    """
+    if ruta.suffix.lower() != ".csv":
+        wb = openpyxl.load_workbook(ruta, data_only=True, read_only=True)
+        ws = wb[wb.sheetnames[0]]
+        filas = ws.iter_rows(min_row=1, values_only=True)
+        return next(filas), filas
+
+    enc = detectar_encoding(ruta)
+    with ruta.open("r", encoding=enc, newline="", errors="replace") as f:
+        primera = f.readline()
+        delim = detectar_delimitador(primera)
+        encabezado = next(csv.reader([primera], delimiter=delim), [])
+        cuerpo = list(csv.reader(f, delimiter=delim))
+    return encabezado, cuerpo
 
 
 def _leer_hoja_por_alias(ruta: Path, alias: dict, convertidores: dict,
@@ -117,9 +173,7 @@ def _leer_hoja_por_alias(ruta: Path, alias: dict, convertidores: dict,
     nombre normalizado contra `alias`; si dos encabezados distintos apuntan
     a la misma columna bd (p. ej. Codigo y Código de Barras -> sku), el que
     aparece más a la derecha en el archivo pisa al anterior."""
-    wb = openpyxl.load_workbook(ruta, data_only=True, read_only=True)
-    ws = wb[wb.sheetnames[0]]
-    encabezado = next(ws.iter_rows(min_row=1, max_row=1, values_only=True))
+    encabezado, cuerpo = _filas_crudas(ruta)
 
     columnas = [(i, alias[_normalizar(h)]) for i, h in enumerate(encabezado)
                 if _normalizar(h) in alias]
@@ -132,7 +186,7 @@ def _leer_hoja_por_alias(ruta: Path, alias: dict, convertidores: dict,
         return []
 
     filas = []
-    for fila in ws.iter_rows(min_row=2, values_only=True):
+    for fila in cuerpo:
         if all(v is None or v == "" for v in fila):
             continue
         d = {col: convertidores[col](fila[i]) for i, col in columnas}
