@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from orcmm_rca_engine import (FUERA_DE_CATALOGO, EvidenciaSKUTienda, MotorRCA,
+from orcmm_rca_engine import (FUERA_DE_CATALOGO, SIN_DATO_SIMA, EvidenciaSKUTienda, MotorRCA,
                               ViaResurtido)
 
 
@@ -71,19 +71,25 @@ class DiagnosticoPeriodoSKUTienda:
 
 
 def dentro_del_alcance(diagnosticos: List[dict]) -> List[dict]:
-    """Quita los días cuyo SKU no está en el catálogo de la tienda.
+    """Quita los días que no le tocan al análisis. Hay DOS motivos:
+
+      - el SKU no está en el catálogo de la tienda (FUERA_DE_CATALOGO): es
+        una división que este análisis no cubre.
+      - SIMA no trae ningún pedido del SKU (SIN_DATO_SIMA): sin ese dato la
+        prioridad 3 no se puede contestar.
 
     Se usa para el Pareto y el detalle por SKU, que responden "¿de qué se
-    está muriendo el negocio?". Meter ahí SKU de divisiones que el análisis
-    no cubre inventa un 'Sin clasificar' gigante que no es una causa raíz,
-    es una extracción mal filtrada — y esconde el Pareto real debajo.
+    está muriendo el negocio?". Meter ahí cualquiera de los dos inventa un
+    bloque gigante que no es una causa raíz y esconde el Pareto real debajo.
 
-    La cobertura sí los sigue contando y los reporta aparte: se separan, no
-    se descartan. La hoja de clasificación diaria también los conserva, con
-    su motivo. Ver FUERA_DE_CATALOGO.
+    Los dos se conservan en la clasificación diaria, cada uno con su motivo,
+    que es donde se auditan. Y el segundo se reporta aparte —cuántos SKU y
+    cuántos días— porque a diferencia del primero, ése SÍ debía tener dato:
+    ver resumen_excluidos_sima y EXCLUIR_SKU_SIN_SIMA.
     """
     return [dg for dg in diagnosticos
-            if FUERA_DE_CATALOGO not in dg["datos_faltantes"]]
+            if FUERA_DE_CATALOGO not in dg["datos_faltantes"]
+            and SIN_DATO_SIMA not in dg["datos_faltantes"]]
 
 
 def diagnosticar_periodo(diagnosticos: List[dict],
@@ -204,7 +210,12 @@ def cobertura_modelo(diagnosticos: List[dict]) -> dict:
             vp_clasificada += vp
             continue
 
-        if FUERA_DE_CATALOGO in dg["datos_faltantes"]:
+        # Los dos motivos de exclusión salen del alcance. Si sólo se restara
+        # el de catálogo, la cobertura se calcularía sobre un denominador que
+        # incluye días que el Pareto ya no cuenta, y los dos números dejarían
+        # de hablar del mismo universo.
+        if (FUERA_DE_CATALOGO in dg["datos_faltantes"]
+                or SIN_DATO_SIMA in dg["datos_faltantes"]):
             fuera_casos += 1
             vp_fuera += vp
 

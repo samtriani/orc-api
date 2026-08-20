@@ -31,6 +31,7 @@ from orcmm_pipeline import (Fuentes, PaqueteFuentes, aviso_prioridad_3,  # noqa:
                             desempeno_proveedores, discrepancias_pedido_cita,
                             escribir_resultado, fill_rate_proveedor, leer_fuentes,
                             nivel_servicio_tienda, osa_alcance, osa_general,
+                            resumen_excluidos_sima,
                             universo_osa, waterfall_osa)
 from orcmm_rca_engine import FUERA_DE_CATALOGO                  # noqa: E402
 from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
@@ -260,10 +261,9 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict], jer: IndiceJerarquia) -> 
     hundido. Los días (`dias`) no lo necesitan: salen de la misma lista
     `en_alcance` que `por_sku_tienda`, así que ahí siempre hay renglón.
     """
-    catalogo = {llave: True for llave in fu.catalogo}
     universo: Dict[tuple, int] = defaultdict(int)
     for (sku, tienda, _) in fu.osa:
-        if (sku, tienda) in catalogo:
+        if fu.en_alcance(sku, tienda):
             universo[(sku, tienda)] += 1
 
     causas: List[dict] = []
@@ -365,6 +365,10 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "fill_rate_proveedor": fill_rate_proveedor(fu),
         # La otra pata de la cadena: proveedor→CEDIS arriba, CEDIS→tienda aquí.
         "nivel_servicio_tienda": nivel_servicio_tienda(fu),
+        # El letrero: cuántos SKU se dejaron fuera por no tener datos de
+        # SIMA. Va SIEMPRE, aunque sea cero, para que el front no tenga
+        # que adivinar si la exclusión está activa.
+        "excluidos_sin_sima": resumen_excluidos_sima(fu, umbral_osa),
         "umbral_osa": umbral_osa,
         "aviso_parcial": aviso_prioridad_3(fu),
         "advertencias": fu.advertencias,

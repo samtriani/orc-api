@@ -37,7 +37,8 @@ from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
                                llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
                                ORIGEN_CENTRALIZADO, normalizar_encabezado)
-from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, FUERA_DE_CATALOGO,
+from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, EXCLUIR_SKU_SIN_SIMA,
+                              FUERA_DE_CATALOGO, SIN_DATO_SIMA,
                               EvidenciaSKUTienda, TipoResurtido, ViaResurtido)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
                                diagnosticar_periodo, pareto_periodo,
@@ -206,7 +207,7 @@ def osa_alcance(fu: "Fuentes") -> Optional[float]:
     if fu.vacia("CATALOGO"):
         return osa_general(fu)
     valores = [v for (sku, tienda, _), fila in fu.osa.items()
-               if (sku, tienda) in fu.catalogo
+               if fu.en_alcance(sku, tienda)
                for v in (_osa_pct(fila.get("osa_pct")),) if v is not None]
     return round(sum(valores) / len(valores), 1) if valores else None
 
@@ -251,7 +252,7 @@ def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
     if fu.vacia("CATALOGO"):
         universo = len(fu.osa)
     else:
-        universo = sum(1 for (sku, tienda, _) in fu.osa if (sku, tienda) in fu.catalogo)
+        universo = sum(1 for (sku, tienda, _) in fu.osa if fu.en_alcance(sku, tienda))
 
     osa_real = osa_alcance(fu)
     if not universo or osa_real is None:
@@ -421,6 +422,9 @@ class Fuentes:
     transferencias_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_tienda_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_prov_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
+    # (sku, tienda) del catálogo que SIMA no trae. Vacío cuando la
+    # exclusión está apagada o SIMA no llegó. Ver EXCLUIR_SKU_SIN_SIMA.
+    sin_dato_sima: Set[Tuple[str, str]] = field(default_factory=set)
 
     conteo: Dict[str, int] = field(default_factory=dict)
     rango: Dict[str, Tuple[Optional[date], Optional[date]]] = field(default_factory=dict)
@@ -428,6 +432,20 @@ class Fuentes:
 
     def vacia(self, hoja: str) -> bool:
         return self.conteo.get(hoja, 0) == 0
+
+    def en_alcance(self, sku: str, tienda: str) -> bool:
+        """¿Este SKU-tienda le toca al análisis?
+
+        Definición ÚNICA del alcance: la usan el OSA de portada, el waterfall,
+        el detalle diario y la cobertura. Antes cada uno preguntaba por su
+        cuenta si el SKU estaba en el catálogo, y al agregar un segundo motivo
+        de exclusión eso se habría desincronizado — con el Pareto calculado
+        sobre un universo y el OSA sobre otro, que es la peor forma de fallar
+        aquí porque el waterfall deja de cuadrar sin decirlo.
+        """
+        if (sku, tienda) not in self.catalogo:
+            return False
+        return (sku, tienda) not in self.sin_dato_sima
 
     def cedis_cubre(self, cedis: Optional[str], D: date) -> bool:
         """¿La extracción de CEDIS trae ese día para ese CEDIS?
@@ -582,6 +600,7 @@ def leer_fuentes(paquete, umbral_osa: float = 100.0) -> Fuentes:
 
     _indexar_eventos(fu)
     _revisar_cobertura_de_citas(fu)
+    _marcar_skus_sin_sima(fu)
     _revisar_cobertura_de_sima(fu)
 
     aviso = aviso_prioridad_3(fu)
@@ -660,6 +679,55 @@ def aviso_prioridad_3(fu: Fuentes) -> Optional[str]:
                   f"{'registro' if n == 1 else 'registros'} y se están IGNORANDO. "
                   f"Ya se puede prender el interruptor.")
     return aviso
+
+
+def _marcar_skus_sin_sima(fu: Fuentes) -> None:
+    """Llena fu.sin_dato_sima con los SKU del catálogo que SIMA no trae.
+
+    GUARDIA: si SIMA no llegó, no se excluye NADA. Sin este `return` una
+    entrega sin la hoja dejaría el catálogo entero fuera del alcance y el
+    análisis saldría vacío — el modo de fallo más caro posible, porque no
+    truena: simplemente no hay resultados y parece que no hubo faltantes.
+    """
+    if not EXCLUIR_SKU_SIN_SIMA or fu.vacia("SIMA_PEDIDOS_TIENDA"):
+        return
+    # Mismo criterio que derivar_pedido_tienda: cuenta el pedido propio de la
+    # tienda y también el centralizado, que resurte a todas.
+    con_pedido = {s for (s, _) in fu.pedidos_tienda_por}
+    fu.sin_dato_sima = {(sku, tienda) for (sku, tienda) in fu.catalogo
+                        if sku not in con_pedido}
+
+
+def resumen_excluidos_sima(fu: Fuentes, umbral_osa: float) -> dict:
+    """Cuánto se está dejando fuera por no tener datos de SIMA.
+
+    Es el insumo del letrero. La exclusión sube la cobertura a costa de
+    achicar el universo, así que el resultado tiene que poder decir sobre
+    cuántos SKU se calculó y cuántos se quedaron fuera. Sin esta cifra a la
+    vista, el porcentaje de cobertura no significa nada.
+    """
+    if not fu.sin_dato_sima:
+        return {"skus": 0, "dias_con_faltante": 0, "venta_perdida": 0.0,
+                "skus_en_alcance": len(fu.catalogo)}
+
+    dias = 0
+    venta = 0.0
+    for (sku, tienda, _), fila in fu.osa.items():
+        if (sku, tienda) not in fu.sin_dato_sima:
+            continue
+        osa = _osa_pct(fila.get("osa_pct"))
+        if osa is None or osa >= umbral_osa:
+            continue
+        dias += 1
+        venta += _decimal(fila.get("venta_perdida_estimada")) or 0.0
+
+    return {
+        "skus": len(fu.sin_dato_sima),
+        "dias_con_faltante": dias,
+        "venta_perdida": round(venta, 2),
+        # El denominador honesto: sobre cuántos SKU del catálogo sí se analizó.
+        "skus_en_alcance": len(fu.catalogo) - len(fu.sin_dato_sima),
+    }
 
 
 def _revisar_cobertura_de_sima(fu: Fuentes) -> None:
@@ -989,6 +1057,10 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             # None si no hay catálogo con qué comprobarlo: sin la hoja no se
             # puede afirmar que un SKU esté fuera del alcance.
             en_catalogo=None if fu.vacia("CATALOGO") else cat is not None,
+            # None cuando no se evalúa (SIMA vacía o exclusión apagada):
+            # así la regla de alcance no dispara y nada se excluye.
+            sku_en_sima=(None if not fu.sin_dato_sima
+                         else (sku, tienda) not in fu.sin_dato_sima),
             inventario_tienda=existencia,
             # Banderas de alerta de BOPS (V8). Refinan la subcausa de RC01;
             # None = sin dato (vacío no es cero).

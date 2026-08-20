@@ -122,6 +122,36 @@ FUERA_DE_CATALOGO = "sku_fuera_del_catalogo_de_la_tienda"
 RC00_FUERA_DE_ALCANCE = "RC00"
 CAUSA_FUERA_DE_ALCANCE = "Fuera de alcance · división no analizada"
 
+# ===========================================================================
+# EXCLUIR DEL ALCANCE LOS SKU QUE SIMA NO TRAE   (2026-08-20)
+#
+# Un SKU del catálogo sin NINGÚN pedido en SIMA no se puede evaluar en la
+# prioridad 3: no se sabe si la tienda pidió. Antes esos días salían RC99 y
+# eran el 68% del Pareto — 29,982 de 43,821 en Coyoacán —, con lo que la
+# gráfica de OSA quedaba dominada por una barra que no dice nada del negocio.
+#
+# En True se sacan del alcance, como los que no están en el catálogo: no
+# entran al Pareto, ni al waterfall, ni a la cobertura, ni al denominador del
+# OSA. Siguen en la clasificación diaria, que es donde se auditan.
+#
+# LO QUE ESTO CUESTA, y por eso el front DEBE decirlo:
+#
+#   Estos SKU no están fuera de alcance de verdad. Están en el catálogo,
+#   activos, y son Vía 2 — o sea que el pedido de tienda a CEDIS SÍ debía
+#   existir. No es que no les tocara: es que falta el dato. Excluirlos sube
+#   la cobertura a ~98% pero medida sobre los días que sobrevivieron, y deja
+#   el Pareto calculado sobre los SKU que sí tienen pedido, que probablemente
+#   son los de más rotación. Es sesgo de selección, asumido a propósito.
+#
+#   Por eso el resultado reporta cuántos SKU y días se excluyeron: sin ese
+#   letrero a la vista, el número miente por omisión.
+#
+# Se apaga poniendo False, cuando SIMA entregue completo.
+EXCLUIR_SKU_SIN_SIMA = True
+
+SIN_DATO_SIMA = "sku_sin_pedidos_en_sima"
+CAUSA_SIN_DATO_SIMA = "Fuera de alcance · sin datos de SIMA"
+
 
 class TipoResurtido(str, Enum):
     """Fuente: CATALOGO.tipo_resurtido. Refina el responsable de la prioridad 3
@@ -289,6 +319,9 @@ class EvidenciaSKUTienda:
     # --- Prioridad 0: ¿el SKU pertenece al catálogo de la tienda?  Fuente: CATALOGO
     # None = no se pudo comprobar (catálogo vacío); False = está fuera del alcance.
     en_catalogo: Optional[bool] = None
+    # ¿SIMA trae algún pedido de este SKU? None = no se evaluó
+    # (SIMA vacía o exclusión apagada). Ver EXCLUIR_SKU_SIN_SIMA.
+    sku_en_sima: Optional[bool] = None
 
     # --- Prioridad 1: ¿había producto en tienda?      Fuente: Inventario tienda / BOPS
     inventario_tienda: Optional[int] = None
@@ -427,6 +460,17 @@ class R0_DentroDelCatalogo(Regla):
                 self.prioridad, [FUERA_DE_CATALOGO],
                 ["El SKU no está en el catálogo de la tienda: queda fuera del "
                  "alcance del análisis, no es un dato faltante"])
+        # Mismo trato para los que SIMA no trae: sin un solo pedido no se puede
+        # contestar la prioridad 3, y el día no se puede clasificar sin
+        # inventarle un culpable. Se separa con su propio marcador porque el
+        # motivo es distinto —aquí el dato SÍ debía existir— y el reporte
+        # tiene que poder decirlo. Ver EXCLUIR_SKU_SIN_SIMA.
+        if EXCLUIR_SKU_SIN_SIMA and ev.sku_en_sima is False:
+            return Indeterminado(
+                self.prioridad, [SIN_DATO_SIMA],
+                ["SIMA no trae ningún pedido de este SKU en el periodo: queda "
+                 "fuera del alcance por falta de dato, no por un fallo del "
+                 "modelo"])
         return None
 
 
@@ -849,9 +893,15 @@ class MotorRCA:
             # Lleva código propio para que el reporte diario no los sume al
             # Sin clasificar. Ver RC00_FUERA_DE_ALCANCE.
             "root_cause_id": (RC00_FUERA_DE_ALCANCE
-                              if FUERA_DE_CATALOGO in i.campos_faltantes else "RC99"),
+                              if (FUERA_DE_CATALOGO in i.campos_faltantes
+                                  or SIN_DATO_SIMA in i.campos_faltantes) else "RC99"),
+            # Los dos salen del alcance, pero por motivos distintos y el
+            # renglón tiene que decir cuál: uno es "no le tocaba al modelo",
+            # el otro es "falta el dato que sí debía llegar".
             "causa_raiz": (CAUSA_FUERA_DE_ALCANCE
                            if FUERA_DE_CATALOGO in i.campos_faltantes
+                           else CAUSA_SIN_DATO_SIMA
+                           if SIN_DATO_SIMA in i.campos_faltantes
                            else CausaRaiz.RC99.value),
             "responsable": Responsable.PENDIENTE.value,
             "subcausa": None,
