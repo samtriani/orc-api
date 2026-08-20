@@ -199,7 +199,41 @@ def _proveedores_a_dict(fu: Fuentes, umbral_osa: float = 100.0) -> List[dict]:
     } for d in desempeno_proveedores(fu, umbral_osa)]
 
 
-def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
+class IndiceJerarquia:
+    """Sección/categoría/subcategoría/marca de cada SKU, comprimido.
+
+    Va comprimido por necesidad, no por elegancia. Escribir los cuatro textos
+    en cada renglón cuesta **1.3 MB** medidos sobre la tienda 287 —10,481
+    SKU— encima de una respuesta que ya pesa 1.5 MB; con proveedor y formato
+    eran 2.1 MB. Ese tamaño ya nos costó una vez el spinner infinito en
+    Vercel, así que no se repite.
+
+    En vez de eso se manda el catálogo de COMBINACIONES distintas —3,711 para
+    esa misma tienda, porque miles de SKU comparten sección, categoría y
+    marca— y cada renglón guarda su índice. Baja a 405 KB. Es el mismo truco
+    que usa `_detalle_dias` con las causas.
+
+    El formato de la tienda NO viaja: el análisis corre sobre una sola tienda
+    (ver /api/analizar-tienda), así que sería la misma cadena repetida diez
+    mil veces. El front lo saca de /api/tiendas si lo necesita.
+    """
+
+    def __init__(self, fu: Fuentes):
+        self._fu = fu
+        self.combos: List[list] = []
+        self._indice: Dict[tuple, int] = {}
+
+    def de(self, sku: str, tienda: str) -> int:
+        c = self._fu.comercial.get((sku, tienda)) or {}
+        clave = (c.get("grupo_seccion"), c.get("categoria"),
+                 c.get("subcategoria"), c.get("marca"))
+        if clave not in self._indice:
+            self._indice[clave] = len(self.combos)
+            self.combos.append(list(clave))
+        return self._indice[clave]
+
+
+def _detalle_dias(fu: Fuentes, en_alcance: List[dict], jer: IndiceJerarquia) -> dict:
     """El detalle día por día, comprimido, para que el front pueda recalcular
     el waterfall y los Pareto cuando el usuario filtra.
 
@@ -218,6 +252,13 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
     para que al filtrar se pueda recomponer el denominador correcto. Sin él,
     filtrar a un SKU dejaría los puntos de OSA calculados sobre el universo
     de la tienda entera, que es un número sin sentido.
+
+    Cada renglón del universo lleva su `j` de jerarquía porque esta lista SÍ
+    puede traer SKU que no están en `por_sku_tienda` —los que no tuvieron ni
+    un día con faltante—, y sin el índice esos quedarían sin sección: al
+    filtrar por categoría se caerían del denominador y el OSA saldría
+    hundido. Los días (`dias`) no lo necesitan: salen de la misma lista
+    `en_alcance` que `por_sku_tienda`, así que ahí siempre hay renglón.
     """
     catalogo = {llave: True for llave in fu.catalogo}
     universo: Dict[tuple, int] = defaultdict(int)
@@ -244,7 +285,8 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict]) -> dict:
     return {
         "causas": causas,
         "dias": filas,
-        "universo": [{"s": s, "t": t, "n": n} for (s, t), n in universo.items()],
+        "universo": [{"s": s, "t": t, "n": n, "j": jer.de(s, t)}
+                     for (s, t), n in universo.items()],
     }
 
 
@@ -284,6 +326,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
     # contando todo y reporta los días fuera de catálogo aparte. Mismo criterio
     # que el Excel, para que la pantalla y el archivo digan lo mismo.
     en_alcance = dentro_del_alcance(diagnosticos)
+    jer = IndiceJerarquia(fu)
 
     por_sku = [{
         "sku": d.sku,
@@ -291,6 +334,12 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         # Para poder buscar por nombre además de por código en el front —
         # no se usa para clasificar, sólo se arrastra al output.
         "descripcion": fu.catalogo.get((d.sku, d.tienda), {}).get("descripcion"),
+        # Índice al catálogo `jerarquia` de abajo: sección, categoría,
+        # subcategoría y marca. Viaja sólo para filtrar y leer el reporte,
+        # ninguna regla del motor lo consume. Cuando el análisis corre por
+        # archivo apunta a un combo de puros nulos, porque el catálogo
+        # comercial sólo vive en Postgres.
+        "j": jer.de(d.sku, d.tienda),
         "dias_con_faltante": d.dias_con_faltante,
         "dias_clasificados": d.dias_clasificados,
         "cobertura_pct": d.cobertura_pct,
@@ -325,7 +374,11 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "por_responsable": resumen_por_responsable(en_alcance),
         "por_subcausa": resumen_por_subcausa(en_alcance),
         "por_sku_tienda": por_sku,
-        "detalle_dias": _detalle_dias(fu, en_alcance),
+        "detalle_dias": _detalle_dias(fu, en_alcance, jer),
+        # El catálogo que resuelve la `j` de cada renglón: una lista de
+        # [sección, categoría, subcategoría, marca]. Va después de las dos
+        # listas que lo indexan porque se llena mientras se arman.
+        "jerarquia": jer.combos,
         "proveedores": _proveedores_a_dict(fu, umbral_osa),
         "citas_falladas": [{
             **f, "fecha_cita": f["fecha_cita"].isoformat() if f["fecha_cita"] else None

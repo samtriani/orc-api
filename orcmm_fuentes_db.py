@@ -151,6 +151,34 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
             fu.conteo["CATALOGO"] = len(filas)
             fu.rango["CATALOGO"] = (None, None)
 
+            # 1b. CATÁLOGO COMERCIAL — sección, categoría, subcategoría y
+            #     marca, para poder filtrar y leer el reporte. NO se usa para
+            #     clasificar: eso sale de `catalogo`, que es el transaccional.
+            #
+            #     Se piden sólo esas cuatro columnas, no SELECT *: la tabla
+            #     tiene 20 y son ~40 mil filas por tienda que se quedan en
+            #     memoria toda la corrida.
+            #
+            #     Si la tabla no existe o está vacía, el análisis sigue igual
+            #     y el front simplemente no ofrece esos filtros: es un adorno
+            #     del reporte, no una fuente del motor.
+            _avisar(avisar, "leyendo catálogo comercial")
+            try:
+                sql = ("SELECT sku, tienda, grupo_seccion, categoria, subcategoria, marca "
+                       "FROM catalogo_sku_tienda WHERE tienda = %s")
+                params = [tienda]
+                if sku:
+                    sql += " AND sku = %s"
+                    params.append(sku)
+                cur.execute(sql, params)
+                for f in cur.fetchall():
+                    fu.comercial[(_texto(f["sku"]), _texto(f["tienda"]))] = f
+            except Exception as e:
+                conn.rollback()
+                fu.advertencias.append(
+                    f"No se pudo leer el catálogo comercial ({e}). El análisis corre "
+                    f"igual; sólo faltarán los filtros de jerarquía y marca.")
+
             _avisar(avisar, "leyendo BOPS (días con faltante)")
             # 2. BOPS_OSA — define qué días entran al análisis. Se lee ANTES
             #    de inv_tienda/ventas a propósito: de aquí sale la lista de

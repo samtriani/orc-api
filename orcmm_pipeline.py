@@ -405,6 +405,13 @@ class Fuentes:
     # puede leer como existencia cero.
     dias_cedis: Dict[str, Set[date]] = field(default_factory=dict)
 
+    # Catálogo comercial por (sku, tienda): sección, categoría, subcategoría
+    # y marca. NO se usa para clasificar —eso sale de `catalogo`, que es el
+    # transaccional— sino para poder filtrar y leer el reporte. Sólo se llena
+    # leyendo de Postgres; en el camino por archivo queda vacío y el front
+    # simplemente no ofrece esos filtros.
+    comercial: Dict[Tuple[str, str], dict] = field(default_factory=dict)
+
     # Eventos agrupados por la clave con la que se consultan y con las fechas
     # ya convertidas. Ver _indexar_eventos: sin esto cada día con faltante
     # recorre la lista completa de eventos.
