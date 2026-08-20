@@ -649,7 +649,7 @@ def aviso_prioridad_3(fu: Fuentes) -> Optional[str]:
         return None
 
     aviso = ("ANÁLISIS PARCIAL — la prioridad 3 está apagada mientras SIMA entrega los "
-             "pedidos de tienda. Ningún día puede salir como RC03 'Pedido No Generado', y "
+             "pedidos de tienda. Ningún día puede salir como RC03 'Pedido de tienda no generado', y "
              "los días que le corresponderían se están repartiendo entre RC04 (CEDIS), "
              "RC05 y RC06 (proveedor). Sirve para leer la rama de abasto; NO para repartir "
              "responsabilidades en firme. Se reactiva con EVALUAR_PEDIDO_TIENDA = True.")

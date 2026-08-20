@@ -31,7 +31,12 @@ from typing import Dict, List, Optional, Union
 class CausaRaiz(str, Enum):
     RC01 = "Ejecución en Tienda"
     RC02 = "Transporte / Tránsito"
-    RC03 = "Pedido No Generado"
+    # Neutra a propósito: la causa cubre los dos casos y el responsable los
+    # separa —automático a Compras, manual a Tienda—, así que el nombre no
+    # puede comprometerse con uno. Que fue el sistema lo dice la subcausa,
+    # que sólo aparece cuando el catálogo lo respalda. "De tienda" y no "a
+    # tienda": el pedido va de la sucursal al CEDIS.
+    RC03 = "Pedido de tienda no generado"
     RC04 = "CEDIS No Surtió"
     RC05 = "Pedido Proveedor No Generado"
     RC06 = "Incumplimiento Proveedor"
@@ -120,7 +125,7 @@ CAUSA_FUERA_DE_ALCANCE = "Fuera de alcance · división no analizada"
 
 class TipoResurtido(str, Enum):
     """Fuente: CATALOGO.tipo_resurtido. Refina el responsable de la prioridad 3
-    (RC03 'Pedido No Generado') cuando SIMA confirma que no hubo pedido de
+    (RC03 'Pedido de tienda no generado') cuando SIMA confirma que no hubo pedido de
     tienda: ver RESPONSABLE_PEDIDO_NO_GENERADO más abajo.
     """
     MANUAL = "Manual"
@@ -144,7 +149,7 @@ class SubcausaPedidoTienda(str, Enum):
 # PRIORIDAD 3 / SIMA_PEDIDOS_TIENDA   (apagada 2026-08-05, PRENDIDA 2026-08-18)
 #
 # SIMA ya entrega los pedidos de tienda, así que la prioridad 3 vuelve a
-# evaluarse y RC03 'Pedido No Generado' es alcanzable otra vez.
+# evaluarse y RC03 'Pedido de tienda no generado' es alcanzable otra vez.
 #
 # Lo que estuvo pasando mientras estuvo apagada, y que ahora se corrige: la
 # regla 3 se saltaba y el árbol pasaba de largo del inventario en tienda a la
