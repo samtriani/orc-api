@@ -18,6 +18,7 @@ import csv
 import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -61,6 +62,26 @@ def _codigo(v) -> Optional[str]:
 # traen "Línea"/"Vía" en absoluto. Por eso se empareja por NOMBRE con alias
 # (mismo criterio que orcmm_layout_spec.ALIAS_ENCABEZADOS), no por posición
 # fija — sólo sku/tienda son obligatorios, el resto que falte queda NULL.
+def _normalizar(s) -> str:
+    """Encabezado comparable: sin acentos, sin mayúsculas, sin espacios de más.
+
+    Los acentos SE QUITAN a propósito. Antes se comparaba letra por letra y
+    "Código" no calzaba con la llave "codigo": la columna se ignoraba en
+    silencio y, por ser obligatoria, el archivo entero se abortaba con un
+    "faltan columnas". Las llaves de los ALIAS pasan por aquí también, así que
+    da igual con qué acentuación venga el archivo.
+    """
+    limpio = " ".join(str(s or "").split()).strip().lower()
+    return "".join(c for c in unicodedata.normalize("NFD", limpio)
+                   if unicodedata.category(c) != "Mn")
+
+
+def _con_llaves_limpias(d: dict) -> dict:
+    """Pasa las llaves de un mapa de alias por la misma regla que el
+    encabezado del archivo, para que los dos lados se comparen igual."""
+    return {_normalizar(k): v for k, v in d.items()}
+
+
 def _sin_prefijo(v) -> Optional[str]:
     """Quita el prefijo numérico de la jerarquía comercial.
 
@@ -76,13 +97,13 @@ def _sin_prefijo(v) -> Optional[str]:
     return re.sub(r"^\s*\d+\s*-\s*", "", t) if t else t
 
 
-ALIAS_SUCURSALES = {
+ALIAS_SUCURSALES = _con_llaves_limpias({
     "formato": "formato",
     "no. tienda": "tienda",
     "nombre de la tienda": "nombre",
     "dirección": "direccion",
     "cp": "cp",
-}
+})
 CONVERTIDORES_SUCURSALES = {
     "formato": _texto, "tienda": _codigo, "nombre": _texto,
     "direccion": _texto, "cp": _texto,
@@ -90,10 +111,12 @@ CONVERTIDORES_SUCURSALES = {
 REQUERIDOS_SUCURSALES = {"tienda"}
 COLUMNAS_BD_SUCURSALES = ["tienda", "formato", "nombre", "direccion", "cp"]
 
-ALIAS_SKU_TIENDA = {
+ALIAS_SKU_TIENDA = _con_llaves_limpias({
     "fecha inicial": "fecha_inicial",
     "tienda no": "tienda",
+    "numero tienda": "tienda",
     "tienda nombre": "tienda_nombre",
+    "nombre tienda": "tienda_nombre",
     "codigo": "sku",
     "code": "sku",
     "código de barras": "sku",
@@ -116,7 +139,7 @@ ALIAS_SKU_TIENDA = {
     "linea o i&o": "linea_io",
     "via 1 o via 2": "via_resurtido",
     "vía": "via_resurtido",
-}
+})
 CONVERTIDORES_SKU_TIENDA = {
     "fecha_inicial": _fecha, "tienda": _codigo, "tienda_nombre": _texto, "sku": _codigo,
     "articulo_nombre": _texto, "division": _sin_prefijo, "grupo_seccion": _sin_prefijo,
@@ -133,10 +156,6 @@ COLUMNAS_BD_SKU_TIENDA = ["sku", "tienda", "tienda_nombre", "articulo_nombre", "
                           "resurtido_tipo", "resurtido_frec",
                           "unidades_empaque", "resurtido", "catalogo_activo", "linea_io",
                           "via_resurtido", "fecha_inicial"]
-
-
-def _normalizar(s) -> str:
-    return " ".join(str(s or "").split()).strip().lower()
 
 
 def _filas_crudas(ruta: Path):
@@ -205,11 +224,35 @@ def cargar_sucursales(cur, ruta: Path, adv: list) -> int:
 
 
 def cargar_catalogo_sku_tienda(cur, ruta: Path, adv: list) -> int:
+    """Carga o COMPLEMENTA el catálogo comercial.
+
+    Sólo se escriben las columnas que el archivo trae de verdad. Es la
+    diferencia entre complementar y pisar: una entrega puede traer la
+    jerarquía comercial (división, categoría, marca) sin traer lo operativo
+    (via_resurtido, unidades_empaque, catálogo activo), y al revés.
+
+    Sin esto, `upsert_lote` mandaba None en cada columna ausente y el SET las
+    escribía encima: cargar el catálogo comercial habría BORRADO
+    via_resurtido y compañía en las 107,339 filas ya cargadas, sin un solo
+    error que lo delatara.
+    """
     filas = _leer_hoja_por_alias(ruta, ALIAS_SKU_TIENDA, CONVERTIDORES_SKU_TIENDA,
                                   REQUERIDOS_SKU_TIENDA, adv)
+    if not filas:
+        return 0
+
+    presentes = {c for f in filas for c in f}
+    columnas = [c for c in COLUMNAS_BD_SKU_TIENDA if c in presentes]
+
+    ausentes = [c for c in COLUMNAS_BD_SKU_TIENDA if c not in presentes]
+    if ausentes:
+        adv.append(f"{ruta.name}: el archivo no trae {sorted(ausentes)}. Esas "
+                    f"columnas se dejan como estaban; sólo se actualizan las "
+                    f"{len(columnas)} que sí vienen.")
+
     total = 0
     for i in range(0, len(filas), TAMANO_LOTE):
-        total += upsert_lote(cur, "catalogo_sku_tienda", COLUMNAS_BD_SKU_TIENDA, ["sku", "tienda"],
+        total += upsert_lote(cur, "catalogo_sku_tienda", columnas, ["sku", "tienda"],
                               filas[i:i + TAMANO_LOTE], adv)
     return total
 
