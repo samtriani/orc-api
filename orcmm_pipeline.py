@@ -973,18 +973,24 @@ def _orden_dsd_del_dia(fu: Fuentes, sku, tienda, D) -> Optional[dict]:
     if not colocados:
         return None
 
-    # Primero los que siguen en tiempo: aún no vence su compromiso.
+    # Sólo los que siguen en tiempo: su compromiso todavía no vence, o vence
+    # justo hoy. Si hay varios traslapados manda el de compromiso más próximo.
+    #
+    # Y SÓLO ésos, a propósito. Un pedido cuyo compromiso ya venció sin
+    # entregar no se arrastra a los días siguientes: que el proveedor haya
+    # fallado el día 23 es un hecho del día 23, y estirarlo para explicar el
+    # 26 ya no es leer el dato, es inferir. Del lado de la tienda sí se
+    # arrastra (ver derivar_pedido_tienda) porque allá la regla evita una
+    # afirmación falsa —"no existe pedido"— en vez de fabricar una acusación.
+    #
+    # Cuando ninguno está en tiempo, el día cae en RC05: venció el compromiso
+    # y nadie colocó una orden nueva.
     vigentes = [(recibo or date.max, pedido, o)
                 for pedido, recibo, o in colocados if recibo is None or recibo >= D]
-    if vigentes:
-        vigentes.sort(key=lambda x: (x[0], x[1]))
-        return vigentes[0][2]
-
-    # Ninguno en tiempo. Si el último colocado se comprometió y entregó CERO,
-    # ese compromiso sigue en falta y es el que explica el día — misma razón
-    # que en derivar_pedido_tienda: la fecha es promesa, no recibo.
-    pedido, _recibo, orden = max(colocados, key=lambda x: x[0])
-    return orden if not _entero(orden.get("cajas_entregadas")) else None
+    if not vigentes:
+        return None
+    vigentes.sort(key=lambda x: (x[0], x[1]))
+    return vigentes[0][2]
 
 
 def derivar_pedido_dsd_generado(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
