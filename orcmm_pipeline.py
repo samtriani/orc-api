@@ -81,25 +81,40 @@ CEDIS_AUSENCIA_ES_CERO = True
 
 
 # ---------------------------------------------------------------------------
-# Parche V8 — la existencia de tienda que entrega Tableau es SÓLO la foto de
-# CIERRE del día (23:59). No hay mínimo intradía real: la columna "Existencia
-# Mínima" llegó duplicando el cierre. Esa foto miente en un día de faltante:
-# un producto que llegó tarde, o que es inventario fantasma, aparece con stock
-# aunque el anaquel estuvo vacío todo el día. Sin corregirlo, ~80% de los
-# faltantes caen en RC01 "Ejecución en tienda" (verificado: 37,752 días, de los
-# cuales el 100% tuvo CERO venta ese día).
+# APAGADO (2026-08-21). Ver abajo por qué, antes de volver a prenderlo.
 #
-# Criterio: en un día con faltante (OSA<umbral) con existencia de cierre > 0,
-# si el SKU NO vendió nada, el cierre no es confiable -> se trata como 0 y el
-# día fluye a las ramas de abasto (CEDIS / proveedor) en vez de quedar atrapado
-# en RC01. Se PRESERVA RC01 cuando BOPS envió alerta (alerta_enviada = 1): la
-# alerta es evidencia de que el producto estaba en tienda y se avisó surtirlo,
-# que es ejecución real.
+# La idea: la existencia de tienda que entrega Tableau es SÓLO la foto de
+# CIERRE del día (23:59), y esa foto miente en un día de faltante — un
+# producto que llegó tarde, o que es inventario fantasma, aparece con stock
+# aunque el anaquel estuvo vacío todo el día. El parche trataba ese cierre
+# como 0 cuando el SKU no había vendido nada, para que el día fluyera a las
+# ramas de abasto en vez de quedar atrapado en RC01.
 #
-# Es un criterio determinista y auditable, como CEDIS_AUSENCIA_ES_CERO. Cuando
-# Tableau entregue un mínimo intradía REAL, poner en False: el pipeline ya
-# prefiere existencia_minima_dia sobre la foto de cierre y este parche sobra.
-INVENTARIO_CIERRE_NO_CONFIABLE = True
+# POR QUÉ SE APAGA. Dos razones, y la segunda es la que importa:
+#
+#   1. Regla de negocio (La Comer, 2026-08-21): el árbol es explícito y no se
+#      asume. Si el OSA es cero y hay inventario en tienda, es RC01 y punto.
+#
+#   2. El parche NO PODÍA medir lo que preguntaba. TABLEAU_VENTAS trae fila
+#      para el 2.2% de los días con faltante (1,015 de 47,095 en Coyoacán),
+#      así que "no vendió" era en realidad "no hay registro de venta". De los
+#      37,168 días que se forzaron a cero, 37,167 fue por FALTA DE FILA y uno
+#      solo por una venta genuinamente en cero. Eso es tratar vacío como cero,
+#      que es justo lo que el resto del pipeline prohíbe — cedis_cubre(),
+#      _es_vacio() y derivar_pedido_tienda existen para no hacerlo.
+#
+#      Y la evidencia que justificaba el parche —"37,752 días, el 100% con
+#      cero venta"— era el artefacto: daba 100% porque el 97.8% no tenía
+#      registro que consultar.
+#
+# El problema de fondo SIGUE SIENDO REAL: el inventario fantasma existe. Lo
+# que no era válido es el proxy. Se resuelve con un mínimo intradía de verdad
+# —hoy existencia_minima_dia viene nula en las 2,719,780 filas—, y cuando
+# llegue, el pipeline ya lo prefiere sobre el cierre y este parche sobra.
+#
+# Si se vuelve a prender, ver también la guarda de `venta_row is not None` en
+# derivar_evidencias: sin ella el interruptor repite el mismo error.
+INVENTARIO_CIERRE_NO_CONFIABLE = False
 
 
 # Errores de Excel que llegan como texto en la celda. Aparecen cuando el layout
@@ -1025,7 +1040,12 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
                 if vendidas is None:
                     vendidas = _decimal(venta_row.get("importe_venta"))
             alerto = _bool_alerta(fila_osa.get("alerta_enviada"))
-            if not vendidas and not alerto:
+            # `venta_row is not None` NO es redundante: sin ella, un día sin
+            # fila en TABLEAU_VENTAS se leía como "no vendió" y disparaba el
+            # descarte. Como la hoja cubre el 2.2% de los días con faltante,
+            # eso convertía el parche en "descarta casi todo". Ver
+            # INVENTARIO_CIERRE_NO_CONFIABLE.
+            if venta_row is not None and not vendidas and not alerto:
                 existencia = 0
                 inv_cierre_descartado += 1
 
