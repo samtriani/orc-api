@@ -60,9 +60,11 @@ COLUMNAS = {
     # Las cantidades son el insumo de nivel_servicio_tienda, no del motor.
     "SIMA_PEDIDOS_TIENDA": ["folio", "sku", "origen", "fecha_pedido", "fecha_surtido",
                             "cantidad_pedida_piezas", "cantidad_surtida_piezas"],
+    # `tienda_destino` distingue los pedidos DSD: cuando viene, el proveedor
+    # entrega directo en la tienda y no hay CEDIS de por medio.
     "COMPRAS_PEDIDOS_PROV": ["folio", "sku", "proveedor_id", "proveedor_nombre",
-                             "cedis_destino", "fecha_pedido", "fecha_cita", "fecha_recibo",
-                             "cajas_pedidas", "cajas_entregadas"],
+                             "cedis_destino", "tienda_destino", "fecha_pedido", "fecha_cita",
+                             "fecha_recibo", "cajas_pedidas", "cajas_entregadas"],
     "CITAS_PROV_CEDIS": ["folio", "folio_cita", "sku", "proveedor_id", "proveedor_nombre",
                          "fecha_pedido", "fecha_cita", "cajas_confirmadas_cita",
                          "cajas_entregadas", "estatus_cita"],
@@ -119,11 +121,12 @@ def _conteos_de_la_hoja(cur, tienda, cedis_ids, desde, hasta, desde_eventos) -> 
                 ([tienda, ORIGEN_CENTRALIZADO], desde_eventos, hasta))
     conteos["SIMA_PEDIDOS_TIENDA"] = cur.fetchone()["n"]
 
+    cur.execute("SELECT count(*) AS n FROM compras_pedidos_prov "
+                "WHERE (cedis_destino = ANY(%s) OR tienda_destino = %s) "
+                "AND fecha_pedido BETWEEN %s AND %s",
+                (cedis_ids or [], tienda, desde_eventos, hasta))
+    conteos["COMPRAS_PEDIDOS_PROV"] = cur.fetchone()["n"]
     if cedis_ids:
-        cur.execute("SELECT count(*) AS n FROM compras_pedidos_prov "
-                    "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
-                    (cedis_ids, desde_eventos, hasta))
-        conteos["COMPRAS_PEDIDOS_PROV"] = cur.fetchone()["n"]
         cur.execute("SELECT count(*) AS n FROM citas_prov_cedis "
                     "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s",
                     (cedis_ids, desde_eventos, hasta))
@@ -361,17 +364,26 @@ def leer_fuentes_db(tienda: str, desde: date, hasta: date,
                        ["fecha_pedido", "fecha_surtido"])
 
             _avisar(avisar, "leyendo pedidos a proveedor")
-            # 8. COMPRAS_PEDIDOS_PROV — cedis_destino, no tienda, con lookback.
+            # 8. COMPRAS_PEDIDOS_PROV — con lookback. Trae DOS clases de pedido
+            #    y hay que pedir las dos:
+            #
+            #      cedis_destino  -> resurtido por CEDIS (Vía 1 y Vía 2)
+            #      tienda_destino -> DSD, el proveedor entrega en la tienda
+            #
+            #    Antes sólo se pedían los primeros, así que los DSD —870 filas y
+            #    330 SKU en Coyoacán— no llegaban a memoria y sus días salían
+            #    como "no existe pedido a proveedor" cuando el pedido sí estaba.
+            #    Ver derivar_dsd_entrego_tienda.
             fu.pedidos_prov = []
-            if cedis_ids:
-                sql = (f"SELECT {_cols('COMPRAS_PEDIDOS_PROV')} FROM compras_pedidos_prov "
-                       "WHERE cedis_destino = ANY(%s) AND fecha_pedido BETWEEN %s AND %s")
-                params = [cedis_ids, desde_eventos, hasta]
-                if sku:
-                    sql += " AND sku = %s"
-                    params.append(sku)
-                cur.execute(sql, params)
-                fu.pedidos_prov = cur.fetchall()
+            sql = (f"SELECT {_cols('COMPRAS_PEDIDOS_PROV')} FROM compras_pedidos_prov "
+                   "WHERE (cedis_destino = ANY(%s) OR tienda_destino = %s) "
+                   "AND fecha_pedido BETWEEN %s AND %s")
+            params = [cedis_ids or [], tienda, desde_eventos, hasta]
+            if sku:
+                sql += " AND sku = %s"
+                params.append(sku)
+            cur.execute(sql, params)
+            fu.pedidos_prov = cur.fetchall()
             _registrar(fu, "COMPRAS_PEDIDOS_PROV", fu.pedidos_prov,
                        ["fecha_pedido", "fecha_recibo"])
 

@@ -357,6 +357,9 @@ class EvidenciaSKUTienda:
     proveedor_folio_cita: Optional[str] = None
 
     # --- Prioridades 9-10 (DSD): entrega directa      Fuente: Pedido DSD / Recibo tienda
+    # ¿Existe pedido DSD al proveedor que cubra el día? Es el equivalente
+    # de la prioridad 7 en la rama directa. None = el SKU no es DSD.
+    pedido_dsd_generado: Optional[bool] = None
     dsd_entrego_tienda: Optional[bool] = None
 
 
@@ -794,6 +797,17 @@ class R9_R10_RamaDSD(Regla):
     def evalua(self, ev, ctx):
         if ev.via_resurtido is not ViaResurtido.DSD:
             return None
+
+        # Igual que la prioridad 7 en la rama de CEDIS: antes de medir si el
+        # proveedor cumplió, hay que saber si alguien le pidió. Sin este paso
+        # un día en que la tienda pidió pero COMPRAS no colocó la orden salía
+        # RC99, cuando el dato dice claramente que no hubo pedido.
+        if ev.pedido_dsd_generado is False:
+            return Dictamen(
+                self.prioridad, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
+                "Pedido DSD",
+                ctx + ["No existe pedido DSD al proveedor que cubra este día"],
+            )
 
         if ev.dsd_entrego_tienda is None:
             return Indeterminado(self.prioridad, ["dsd_entrego_tienda"], list(ctx))

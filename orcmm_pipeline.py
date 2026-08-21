@@ -432,11 +432,16 @@ class Fuentes:
     # ya convertidas. Ver _indexar_eventos: sin esto cada día con faltante
     # recorre la lista completa de eventos.
     #   transferencias_por[(sku, tienda)]   -> [(generacion, salida, recepcion)]
-    #   pedidos_tienda_por[(sku, tienda)]   -> [(pedido, surtido)]
+    #   pedidos_tienda_por[(sku, tienda)]   -> [(pedido, surtido, surtidas)]
     #   pedidos_prov_por[(sku, cedis)]      -> [(pedido, recibo, compromiso, fila)]
     transferencias_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_tienda_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_prov_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
+    # Pedidos DSD por (sku, tienda): los que COMPRAS manda con tienda_destino,
+    # donde el proveedor entrega directo en la sucursal y no hay CEDIS. Van
+    # aparte de pedidos_prov_por porque ése se llavea por CEDIS y un DSD no
+    # tiene. Ver derivar_dsd_entrego_tienda.
+    pedidos_dsd_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     # (sku, tienda) del catálogo que SIMA no trae. Vacío cuando la
     # exclusión está apagada o SIMA no llegó. Ver EXCLUIR_SKU_SIN_SIMA.
     sin_dato_sima: Set[Tuple[str, str]] = field(default_factory=set)
@@ -660,16 +665,29 @@ def _indexar_eventos(fu: Fuentes) -> None:
         fu.pedidos_tienda_por.setdefault(clave, []).append((
             _fecha(p.get("fecha_pedido")),
             _fecha(p.get("fecha_surtido")),
+            # Las piezas que de verdad llegaron. `fecha_surtido` sola no basta
+            # para dar el pedido por cerrado: el 18% de los pedidos trae fecha
+            # y CERO piezas. Ver derivar_pedido_tienda.
+            _entero(p.get("cantidad_surtida_piezas")),
         ))
 
     for o in fu.pedidos_prov:
-        clave = (_texto(o.get("sku")), _texto(o.get("cedis_destino")))
-        fu.pedidos_prov_por.setdefault(clave, []).append((
+        sku_o = _texto(o.get("sku"))
+        evento = (
             _fecha(o.get("fecha_pedido")),
             _fecha(o.get("fecha_recibo")),
             _compromiso(o),
             o,
-        ))
+        )
+        # `tienda_destino` manda: si viene, el pedido es DSD y se indexa por
+        # tienda. Si no, es resurtido por CEDIS y se indexa por CEDIS. Un
+        # pedido no puede ser las dos cosas — trae una destino o la otra.
+        destino_tienda = _texto(o.get("tienda_destino"))
+        if destino_tienda:
+            fu.pedidos_dsd_por.setdefault((sku_o, destino_tienda), []).append(evento)
+        else:
+            fu.pedidos_prov_por.setdefault(
+                (sku_o, _texto(o.get("cedis_destino"))), []).append(evento)
 
 
 def aviso_prioridad_3(fu: Fuentes) -> Optional[str]:
@@ -900,8 +918,25 @@ def derivar_pedido_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
     # igual en vez de duplicarla.
     eventos = list(fu.pedidos_tienda_por.get((sku, tienda), ()))
     eventos += fu.pedidos_tienda_por.get((sku, ORIGEN_CENTRALIZADO), ())
-    for pedido, surtido in eventos:
-        if pedido and pedido <= D and (surtido is None or surtido > D):
+
+    colocados = [(p, s, q) for (p, s, q) in eventos if p and p <= D]
+    if not colocados:
+        return False
+
+    ultimo = max(p for p, _s, _q in colocados)
+    for pedido, surtido, surtidas in colocados:
+        if surtido is None or surtido > D:
+            return True
+        # Se surtió "en fecha"... con CERO piezas. Esa fecha es un compromiso
+        # incumplido, no un recibo: el pedido de la tienda sigue pendiente y
+        # darlo por cerrado le cobra a Compras un pedido que sí generó.
+        # Medido en Coyoacán: 10,314 de 57,024 pedidos (18%) traen fecha de
+        # surtido y cantidad_surtida_piezas = 0.
+        #
+        # Se acota al ÚLTIMO pedido colocado para que la cola no sea infinita:
+        # en cuanto se genera uno nuevo, ése lo reemplaza y el viejo deja de
+        # explicar nada.
+        if not surtidas and pedido >= ultimo:
             return True
     return False
 
@@ -926,6 +961,87 @@ def _compromiso(o: dict) -> date:
     """Fecha en la que se esperaba la mercancía. Ordena las órdenes abiertas."""
     return _fecha(o.get("fecha_cita")) or _fecha(o.get("fecha_recibo")) \
         or _fecha(o.get("fecha_pedido")) or date.max
+
+
+def _orden_dsd_del_dia(fu: Fuentes, sku, tienda, D) -> Optional[dict]:
+    """El pedido DSD que debía tapar el día D: generado antes de D y todavía
+    sin recibir, o recibido ese mismo día. Si hay varios traslapados manda el
+    de compromiso más próximo, igual que derivar_orden_proveedor."""
+    colocados = [(pedido, recibo, o)
+                 for (pedido, recibo, _c, o) in fu.pedidos_dsd_por.get((sku, tienda), ())
+                 if pedido and pedido <= D]
+    if not colocados:
+        return None
+
+    # Primero los que siguen en tiempo: aún no vence su compromiso.
+    vigentes = [(recibo or date.max, pedido, o)
+                for pedido, recibo, o in colocados if recibo is None or recibo >= D]
+    if vigentes:
+        vigentes.sort(key=lambda x: (x[0], x[1]))
+        return vigentes[0][2]
+
+    # Ninguno en tiempo. Si el último colocado se comprometió y entregó CERO,
+    # ese compromiso sigue en falta y es el que explica el día — misma razón
+    # que en derivar_pedido_tienda: la fecha es promesa, no recibo.
+    pedido, _recibo, orden = max(colocados, key=lambda x: x[0])
+    return orden if not _entero(orden.get("cajas_entregadas")) else None
+
+
+def derivar_pedido_dsd_generado(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
+    """¿Existe pedido DSD al proveedor que cubra el día D?
+
+    Es el equivalente de la prioridad 7 para la rama DSD, y hacía falta: sin
+    él, un día en que la tienda pidió pero COMPRAS no había colocado la orden
+    se quedaba sin `dsd_entrego_tienda` y salía RC99, cuando lo que dice el
+    dato es que nadie le pidió al proveedor. Eso es RC05.
+    """
+    if not fu.pedidos_dsd_por.get((sku, tienda)):
+        return None
+    return _orden_dsd_del_dia(fu, sku, tienda, D) is not None
+
+
+def derivar_dsd_entrego_tienda(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
+    """¿El proveedor entregó en la tienda el pedido DSD que cubría el día D?
+
+    Es la evidencia de la prioridad 9, y hasta ahora NADIE la llenaba: el campo
+    estaba declarado en EvidenciaSKUTienda y la regla lo leía, pero siempre
+    llegaba en None, así que cualquier SKU que cayera en la rama DSD salía
+    RC99. No se notaba porque los pedidos DSD ni siquiera se cargaban.
+
+    Se mide por CAJAS, no por fecha. `fecha_recibo` viene llena en las 870
+    filas de Coyoacán, incluidas las 288 que entregaron cero — igual que el
+    `fecha_surtido` de SIMA, es la fecha comprometida y no el recibo real.
+
+    Entrega PARCIAL cuenta como no entregada, mismo criterio que la prioridad 8
+    usa para la rama de CEDIS cuando no hay hoja de citas: así las dos ramas
+    miden al proveedor con la misma vara.
+
+    None cuando no hay ningún pedido DSD que cubra el día: ahí no se sabe si el
+    proveedor falló, y el día se detiene en RC99 en vez de acusarlo.
+    """
+    orden = _orden_dsd_del_dia(fu, sku, tienda, D)
+    if orden is None:
+        return None
+
+    pedidas = _entero(orden.get("cajas_pedidas"))
+    entregadas = _entero(orden.get("cajas_entregadas"))
+    if entregadas is None:
+        return None
+    if pedidas is None:
+        return entregadas > 0
+    return entregadas >= pedidas
+
+
+def es_dsd(fu: Fuentes, sku, tienda) -> bool:
+    """¿Este SKU se resurte en DSD, según COMPRAS?
+
+    La vía la manda el DATO, no el catálogo: si COMPRAS trae un pedido con
+    tienda_destino para este SKU, el proveedor le entrega directo a la tienda
+    y punto (decisión de negocio, La Comer 2026-08-21). En Coyoacán el
+    catálogo marca esos 330 SKU como Vía 2, que los mandaría por la rama de
+    CEDIS a buscar un inventario que en un DSD no existe.
+    """
+    return bool(fu.pedidos_dsd_por.get((sku, tienda)))
 
 
 def derivar_orden_proveedor(fu: Fuentes, sku, cedis, D) -> OrdenProveedor:
@@ -1070,6 +1186,15 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             venta = fu.ventas.get((sku, tienda, D))
             venta_perdida = _decimal(venta.get("venta_perdida_estimada")) if venta else None
 
+        # Si COMPRAS trae pedidos con tienda_destino, el SKU es DSD y el
+        # árbol tiene que mandarlo por las prioridades 9 y 10, no por la rama
+        # de CEDIS. La vía del catálogo se respeta en todo lo demás.
+        if es_dsd(fu, sku, tienda):
+            via = ViaResurtido.DSD
+        es_via_dsd = via is ViaResurtido.DSD
+        pedido_dsd = derivar_pedido_dsd_generado(fu, sku, tienda, D) if es_via_dsd else None
+        entrego_dsd = derivar_dsd_entrego_tienda(fu, sku, tienda, D) if es_via_dsd else None
+
         orden = derivar_orden_proveedor(fu, sku, cedis, D) if cedis else OrdenProveedor()
 
         evidencias.append(EvidenciaSKUTienda(
@@ -1092,6 +1217,10 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             pedido_tienda_generado=derivar_pedido_tienda(fu, sku, tienda, D),
             tipo_resurtido=tipo_resurtido,
             via_resurtido=via,
+            # Prioridad 9: primero si hay pedido DSD que cubra el día, y
+            # luego si el proveedor lo entregó — por cajas, no por fecha.
+            pedido_dsd_generado=pedido_dsd,
+            dsd_entrego_tienda=entrego_dsd,
             inventario_cedis=existencia_cedis,
             envio_cedis_generado=derivar_envio_generado(fu, sku, tienda, D),
             pedido_proveedor_generado=orden.existe,
