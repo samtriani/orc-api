@@ -270,11 +270,16 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict], jer: IndiceJerarquia) -> 
     indice: Dict[tuple, int] = {}
     filas = []
     for dg in en_alcance:
-        clave = (dg["root_cause_id"], dg["causa_raiz"], dg["responsable"])
+        # La subcausa entra en la LLAVE del catálogo, no en cada día: son un
+        # puñado de combinaciones distintas contra decenas de miles de
+        # renglones. Va aquí para que el front pueda recalcular el desglose
+        # fino al filtrar, igual que ya hace con los dos Pareto.
+        clave = (dg["root_cause_id"], dg["causa_raiz"], dg["responsable"],
+                 dg.get("subcausa"))
         if clave not in indice:
             indice[clave] = len(causas)
             causas.append({"root_cause_id": clave[0], "causa": clave[1],
-                           "responsable": clave[2]})
+                           "responsable": clave[2], "subcausa": clave[3]})
         filas.append({
             "s": dg["sku"],
             "t": dg["tienda"],
