@@ -300,18 +300,23 @@ llega y se olvida, el pipeline avisa que está ignorando datos que ya existen.
 
 ### Pendientes de ratificar con La Comer
 
-- `RESPONSABLE_SIN_CITA = Responsable.PROVEEDOR` — se asume que el proveedor
-  solicita la cita. Si la agenda Compras, cambiarlo.
+- `SIN_CITA_VA_A = "compras"` — un pedido sin cita ya no es incumplimiento
+  del proveedor. Medido: 811,095 de 848,027 pedidos a CEDIS (95.6%) no traen
+  cita, y `CITAS_PROV_CEDIS` sólo cubre febrero y marzo mientras COMPRAS va de
+  mayo 2025 a junio 2026 — es hueco de extracción, no conducta. Además el
+  pedido que se mira aún no se recibe, así que no hay plazo que el proveedor
+  haya podido incumplir. Que esos días sean de **Compras** es decisión del
+  equipo (2026-08-22), no algo que el dato demuestre; `"sin_clasificar"` es la
+  opción que no afirma nada. Son 4,178 días y $100,821 en Coyoacán marzo.
 - `CLASIFICAR_CITA_PENDIENTE = True` — un faltante anterior a la cita del
-  proveedor se dictamina RC05 / Compras-Abasto. El responsable es el correcto,
-  pero la etiqueta RC05 ("Pedido Proveedor No Generado") queda forzada, porque
-  el pedido sí existe. En `False` se reporta como hueco de la matriz.
+  proveedor se dictamina RC05 / Compras-Abasto.
 
 ### Huecos conocidos de la matriz
 
 - Entrega completa del proveedor con CEDIS en cero: ninguna de las 10 reglas lo
   cubre. Cae como RC99 nombrando el hueco.
-- `CITAS_PROV_CEDIS`: 23 de 33 pedidos no traen cita. El modelo lo lee como "el
-  proveedor nunca agendó" (RC06). **Falta que Compras confirme** que la
-  extracción trae todas las citas del periodo; si vino parcial, es un hueco de
-  captura convertido en acusación.
+- `CITAS_PROV_CEDIS` llega muy parcial: 95.6% de los pedidos sin cita, y sólo
+  cubre febrero y marzo. Ya no se convierte en acusación contra el proveedor
+  (ver `SIN_CITA_VA_A`), pero mientras siga así la prioridad 8 no puede
+  distinguir "no agendó" de "no lo extrajimos". **Pedirle a Compras la
+  extracción completa del periodo.**

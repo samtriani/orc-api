@@ -38,7 +38,13 @@ class CausaRaiz(str, Enum):
     # tienda": el pedido va de la sucursal al CEDIS.
     RC03 = "Pedido de tienda no generado"
     RC04 = "CEDIS No Surtió"
-    RC05 = "Pedido Proveedor No Generado"
+    # "tardío o no generado" porque la causa cubre las dos cosas, y el nombre
+    # viejo —"Pedido Proveedor No Generado"— se contradecía con su propia
+    # evidencia: la mayoría de estos días SÍ tienen folio de pedido, lo que
+    # pasa es que se generó tarde para cubrir el consumo. Quien abría el Excel
+    # veía "no generado" al lado del número de pedido y dejaba de creerle al
+    # reporte. El responsable no cambia; sólo deja de negar lo que se ve.
+    RC05 = "Pedido a proveedor tardío o no generado"
     RC06 = "Incumplimiento Proveedor"
     RC99 = "Sin clasificar"
 
@@ -654,7 +660,7 @@ class R5_R6_RamaCedis(Regla):
 class R7_R8_RamaProveedorCedis(Regla):
     """Prioridades 7 y 8 — Vía 1 o Vía 2 con CEDIS en cero.
 
-      7: Sin pedido a proveedor                → Pedido Proveedor No Generado
+      7: Sin pedido a proveedor                → Pedido a proveedor tardío o no generado
       8: Con pedido + entrega incompleta       → Incumplimiento Proveedor
 
     La prioridad 8 se resuelve con la hoja de citas cuando existe. La cita es
