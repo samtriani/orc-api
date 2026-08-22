@@ -53,3 +53,11 @@ CREATE INDEX IF NOT EXISTS ix_runs_corrido_en ON runs (corrido_en DESC);
 -- "¿ya corrí esta tienda y periodo?" — para ofrecer la corrida existente en
 -- vez de recalcular 5.7 minutos de lo mismo.
 CREATE INDEX IF NOT EXISTS ix_runs_tienda_periodo ON runs (tienda, desde, hasta);
+
+-- ---------------------------------------------------------------------------
+-- (sku|tienda) -> [días medidos, días visibles]. Es el insumo del OSA por SKU
+-- del periodo, y NO se puede reconstruir desde el resto de lo guardado: los
+-- días sanos que forman el numerador nunca llegan al detalle diario. Sin esto
+-- el Excel regenerado saldría con el OSA por SKU vacío.
+-- ---------------------------------------------------------------------------
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS universo jsonb;

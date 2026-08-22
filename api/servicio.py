@@ -315,7 +315,7 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict], jer: IndiceJerarquia) -> 
 
 
 def escribir_excel(fu: Fuentes, salida: Path, umbral_osa: float = 100.0,
-                   avisar=None) -> bool:
+                   avisar=None, evidencias=None, diagnosticos=None) -> bool:
     """Escribe el Excel de resultados a partir de un `Fuentes` ya leído.
 
     Existe para poder sacar el Excel de la corrida. Medido sobre Coyoacán
@@ -329,12 +329,25 @@ def escribir_excel(fu: Fuentes, salida: Path, umbral_osa: float = 100.0,
 
     Devuelve False si no había nada que escribir.
     """
-    evidencias = derivar_evidencias(fu, umbral_osa)
+    if evidencias is None:
+        evidencias, diagnosticos = evidencia_y_dictamen(fu, umbral_osa)
     if not evidencias:
         return False
+    if diagnosticos is None:
+        diagnosticos = clasificar(evidencias)
     _avisar(avisar, "generando el Excel de resultados")
-    escribir_resultado(salida, fu, evidencias, clasificar(evidencias), umbral_osa)
+    escribir_resultado(salida, fu, evidencias, diagnosticos, umbral_osa)
     return True
+
+
+def evidencia_y_dictamen(fu: Fuentes, umbral_osa: float = 100.0):
+    """La evidencia de cada día y su dictamen. Un segundo sobre 44 mil días.
+
+    Se expone para que quien necesite las dos cosas —guardar el detalle y
+    escribir el Excel— clasifique una sola vez.
+    """
+    evidencias = derivar_evidencias(fu, umbral_osa)
+    return evidencias, clasificar(evidencias)
 
 
 def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,

@@ -47,6 +47,7 @@ from fastapi.responses import FileResponse
 import orcmm_runs                                              # noqa: E402
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool
 
 # En Fly.io DATABASE_URL llega por `fly secrets set` (variable de entorno
@@ -54,7 +55,8 @@ from starlette.concurrency import run_in_threadpool
 # .env si está — no hace nada si el archivo no existe.
 load_dotenv()
 
-from api.servicio import analizar, escribir_excel, diagnosticar_layout               # noqa: E402
+from api.servicio import analizar, escribir_excel, evidencia_y_dictamen
+from orcmm_pipeline import universo_osa, diagnosticar_layout               # noqa: E402
 from orcmm_db import conectar                                        # noqa: E402
 from orcmm_expediente_db import expediente_sku                       # noqa: E402
 from orcmm_fuentes_csv import hoja_de_archivo                        # noqa: E402
@@ -473,7 +475,10 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
         # esta pantalla; lo único que se pierde es poder volver a consultarla.
         aviso = orcmm_runs.guardar(
             id_, tienda, desde, hasta, resumen, umbral_osa,
-            segundos=trabajo.transcurrido(), origen="bd")
+            segundos=trabajo.transcurrido(), origen="bd",
+            # Sale de los días SANOS, que no llegan al detalle diario: sin
+            # esto el Excel regenerado saldría sin el OSA por SKU.
+            universo=universo_osa(fu, umbral_osa))
         if aviso:
             trabajo.resultado.setdefault("advertencias", []).append(aviso)
 
@@ -483,8 +488,17 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
         # escribir. Si truena, el análisis sigue siendo válido: lo único que
         # se pierde es el botón de descarga, y se dice.
         try:
+            # Una sola pasada de clasificación (~1 s sobre 44 mil días) para
+            # las dos cosas: guardar el detalle y escribir el Excel.
+            trabajo.etapa = "guardando el detalle diario"
+            evidencias, diagnosticos = evidencia_y_dictamen(fu, umbral_osa)
+            aviso_dias = orcmm_runs.guardar_dias(id_, evidencias, diagnosticos)
+            if aviso_dias:
+                trabajo.resultado.setdefault("advertencias", []).append(aviso_dias)
+
             trabajo.etapa = "generando el Excel de resultados"
-            escribir_excel(fu, salida, umbral_osa)
+            escribir_excel(fu, salida, umbral_osa,
+                           evidencias=evidencias, diagnosticos=diagnosticos)
             trabajo.salida = salida
         except Exception as e:
             trabajo.resultado.setdefault("advertencias", []).append(
@@ -581,6 +595,36 @@ async def run(id_: str) -> dict:
     if guardado is None:
         raise HTTPException(404, "Esa corrida no está en el histórico.")
     return guardado
+
+
+@app.get("/api/runs/{id_}/excel")
+async def excel_de_run(id_: str) -> FileResponse:
+    """El Excel de una corrida guardada, generado al pedirlo.
+
+    No vuelve a leer las fuentes ni a clasificar: se reconstruye desde
+    `run_dias` y el resumen. Se ahorran los ~56 s de análisis y queda sólo el
+    costo de escribir el archivo.
+
+    Se escribe en un temporal por petición y se borra al terminar de
+    enviarlo: son 16 MB, y guardarlos por corrida serían gigas en disco por
+    algo que se pide de vez en cuando.
+    """
+    carpeta = Path(tempfile.mkdtemp(prefix="orcmm-xlsx-"))
+    salida = carpeta / "resultado.xlsx"
+    try:
+        hubo = await run_in_threadpool(orcmm_runs.regenerar_excel, id_, salida)
+    except Exception as e:
+        shutil.rmtree(carpeta, ignore_errors=True)
+        raise HTTPException(503, f"No se pudo generar el Excel de esa corrida: {e}")
+    if not hubo:
+        shutil.rmtree(carpeta, ignore_errors=True)
+        raise HTTPException(404, "Esa corrida no tiene detalle guardado. Sólo se puede "
+                                 "regenerar el Excel de las corridas hechas después de "
+                                 "que se empezó a guardar el detalle diario.")
+    return FileResponse(
+        salida, media_type=XLSX, filename=f"Resultado RCA - {id_}.xlsx",
+        background=BackgroundTask(shutil.rmtree, carpeta, ignore_errors=True),
+    )
 
 
 @app.delete("/api/runs/{id_}")

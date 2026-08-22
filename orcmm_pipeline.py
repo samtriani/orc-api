@@ -1280,6 +1280,12 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             f"tienda'. Tableau sólo entrega la foto de cierre (23:59), no el mínimo "
             f"intradía; se apaga con INVENTARIO_CIERRE_NO_CONFIABLE.")
 
+    # Sin duplicados. `derivar_evidencias` puede correr más de una vez
+    # sobre el mismo Fuentes —el resumen y el Excel se calculan por
+    # separado desde que el Excel salió de la corrida— y cada pasada
+    # volvía a anexar las mismas advertencias. Se deduplica conservando
+    # el orden: son texto para leer, y repetidas sólo estorban.
+    fu.advertencias[:] = list(dict.fromkeys(fu.advertencias))
     return evidencias
 
 
@@ -1543,7 +1549,15 @@ def discrepancias_pedido_cita(fu: Fuentes) -> List[dict]:
     return salida
 
 
-def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
+def escribir_hoja_proveedor(wb, fu, diagnosticos: List[dict],
+                            proveedores=None, citas=None, discrepancias=None) -> None:
+    """La hoja de proveedor y citas.
+
+    Los tres bloques se calculan de `fu` salvo que se los pasen ya hechos.
+    Eso es lo que permite regenerar el Excel desde una corrida guardada: ahí
+    no hay fuentes que recorrer, pero las tres listas quedaron tal cual en el
+    resumen. Ver orcmm_runs.regenerar_excel.
+    """
     ws = wb.create_sheet("Proveedor y citas")
     ws.sheet_view.showGridLines = False
     for j, w in enumerate([3, 30, 9, 11, 13, 8, 10, 13, 11, 12, 13, 13, 12, 13], 1):
@@ -1574,7 +1588,7 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
     ws.row_dimensions[f].height = 44
     f += 1
 
-    for d in desempeno_proveedores(fu):
+    for d in (proveedores if proveedores is not None else desempeno_proveedores(fu)):
         etiqueta = f"{d.nombre} ({d.proveedor_id})" if d.nombre else d.proveedor_id
         valores = [etiqueta, d.pedidos, d.cajas_pedidas, d.pct_surtido_pedido,
                    d.citas, d.pedidos_sin_cita, d.cajas_pedidas_con_cita,
@@ -1623,7 +1637,7 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
         f += 1
 
     # --- Citas falladas, una por una --------------------------------------
-    fallas = citas_incumplidas(fu)
+    fallas = citas if citas is not None else citas_incumplidas(fu)
     f += 2
     ws.cell(row=f, column=2, value="Citas en las que el proveedor entregó de menos").font = TITULO
     f += 2
@@ -1645,7 +1659,7 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
         f += 1
 
     # --- Conciliación entre las dos hojas ---------------------------------
-    disc = discrepancias_pedido_cita(fu)
+    disc = discrepancias if discrepancias is not None else discrepancias_pedido_cita(fu)
     if disc:
         f += 2
         ws.cell(row=f, column=2, value="Pedido y cita no cuadran").font = TITULO
@@ -1668,8 +1682,22 @@ def escribir_hoja_proveedor(wb, fu: Fuentes, diagnosticos: List[dict]) -> None:
             f += 1
 
 
-def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTienda],
-                       diagnosticos: List[dict], umbral_osa: float = 100.0):
+def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
+                       umbral_osa: float = 100.0,
+                       proveedores=None, citas=None, discrepancias=None,
+                       precalculado=None):
+    """El Excel de resultados, cinco hojas.
+
+    `fu` puede ser un Fuentes completo o el sustituto que arma
+    orcmm_runs.regenerar_excel desde lo guardado: de aquí sólo se leen
+    advertencias, conteo, rango y vacia(). Las tres listas opcionales evitan
+    recalcular la hoja de proveedor cuando ya vienen del resumen.
+
+    `precalculado` cubre lo que sólo se puede derivar de las fuentes crudas
+    —universo, waterfall, los dos OSA—: sale de los días SANOS, que no llegan
+    al detalle diario, así que un Fuentes reconstruido no lo puede dar.
+    """
+    pre = precalculado or {}
     wb = openpyxl.Workbook()
     aviso = aviso_prioridad_3(fu)
 
@@ -1739,7 +1767,8 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     for col, w in zip("ABCDEF", [4, 40, 12, 18, 14, 26]):
         ws.column_dimensions[col].width = w
 
-    diags = diagnosticar_periodo(en_alcance, universo_osa(fu, umbral_osa))
+    diags = diagnosticar_periodo(
+        en_alcance, pre.get("universo") or universo_osa(fu, umbral_osa))
     par = pareto_periodo(diags)
 
     ws["B2"] = "Pareto del periodo"
@@ -1758,7 +1787,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     # pesos: no qué causa costó más dinero, sino cuántos puntos de
     # disponibilidad quitó cada una. Un día con faltante pesa igual que
     # cualquier otro para el OSA, valga lo que valga.
-    agua = waterfall_osa(fu, diagnosticos)
+    agua = pre.get("waterfall") or waterfall_osa(fu, diagnosticos)
     if agua["escalones"]:
         ws.cell(row=f, column=2, value="Dónde se pierde la disponibilidad").font = TITULO
         f += 1
@@ -1868,7 +1897,7 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
     ws.auto_filter.ref = f"A4:L{4 + len(diags)}"
 
     # --- Proveedor y citas ------------------------------------------------
-    escribir_hoja_proveedor(wb, fu, en_alcance)
+    escribir_hoja_proveedor(wb, fu, en_alcance, proveedores, citas, discrepancias)
 
     # --- Cobertura y fuentes ---------------------------------------------
     ws = wb.create_sheet("Cobertura y fuentes")
@@ -1877,8 +1906,8 @@ def escribir_resultado(ruta: Path, fu: Fuentes, evidencias: List[EvidenciaSKUTie
         ws.column_dimensions[col].width = w
 
     cob = cobertura_modelo(diagnosticos)
-    cob["osa_general"] = osa_general(fu)
-    cob["osa_alcance"] = osa_alcance(fu)
+    cob["osa_general"] = pre["osa_general"] if "osa_general" in pre else osa_general(fu)
+    cob["osa_alcance"] = pre["osa_alcance"] if "osa_alcance" in pre else osa_alcance(fu)
 
     ws["B2"] = "Cobertura del modelo"
     ws["B2"].font = TITULO
