@@ -32,8 +32,9 @@ from orcmm_pipeline import (Fuentes, PaqueteFuentes, aviso_prioridad_3,  # noqa:
                             escribir_resultado, fill_rate_proveedor, leer_fuentes,
                             nivel_servicio_tienda, osa_alcance, osa_general,
                             resumen_excluidos_sima,
-                            universo_osa, waterfall_osa)
-from orcmm_rca_engine import FUERA_DE_CATALOGO                  # noqa: E402
+                            universo_osa, waterfall_osa,
+                            VIAS, clave_catalogo, es_dsd)
+from orcmm_rca_engine import FUERA_DE_CATALOGO, ViaResurtido    # noqa: E402
 from orcmm_rca_periodo import (clasificar, cobertura_modelo,    # noqa: E402
                                dentro_del_alcance, diagnosticar_periodo,
                                resumen_por_causa, resumen_por_responsable,
@@ -201,7 +202,7 @@ def _proveedores_a_dict(fu: Fuentes, umbral_osa: float = 100.0) -> List[dict]:
 
 
 class IndiceJerarquia:
-    """Sección/categoría/subcategoría/marca de cada SKU, comprimido.
+    """Sección/categoría/subcategoría/marca y VÍA de cada SKU, comprimido.
 
     Va comprimido por necesidad, no por elegancia. Escribir los cuatro textos
     en cada renglón cuesta **1.3 MB** medidos sobre la tienda 287 —10,481
@@ -217,6 +218,16 @@ class IndiceJerarquia:
     El formato de la tienda NO viaja: el análisis corre sobre una sola tienda
     (ver /api/analizar-tienda), así que sería la misma cadena repetida diez
     mil veces. El front lo saca de /api/tiendas si lo necesita.
+
+    La VÍA va aquí y no en el renglón por la misma razón, y con una ventaja
+    extra: los renglones del universo también indexan este catálogo, así que
+    al filtrar por vía el denominador del OSA se recompone solo.
+
+    Y es la vía que el MODELO usó, no la que dice el catálogo. Desde que los
+    pedidos DSD se leen de COMPRAS, 330 SKU de Coyoacán que el catálogo marca
+    "Vía 2" se clasifican por la rama directa. Ofrecer el filtro con la vía
+    del catálogo dejaría al usuario eligiendo "Vía 2" y viendo los días
+    resueltos por la rama de DSD, que se contradice solo.
     """
 
     def __init__(self, fu: Fuentes):
@@ -224,10 +235,18 @@ class IndiceJerarquia:
         self.combos: List[list] = []
         self._indice: Dict[tuple, int] = {}
 
+    def _via(self, sku: str, tienda: str) -> Optional[str]:
+        if es_dsd(self._fu, sku, tienda):
+            return ViaResurtido.DSD.value
+        cat = self._fu.catalogo.get((sku, tienda)) or {}
+        via = VIAS.get(clave_catalogo(cat.get("via_resurtido")))
+        return via.value if via else None
+
     def de(self, sku: str, tienda: str) -> int:
         c = self._fu.comercial.get((sku, tienda)) or {}
         clave = (c.get("grupo_seccion"), c.get("categoria"),
-                 c.get("subcategoria"), c.get("marca"))
+                 c.get("subcategoria"), c.get("marca"),
+                 self._via(sku, tienda))
         if clave not in self._indice:
             self._indice[clave] = len(self.combos)
             self.combos.append(list(clave))
@@ -385,8 +404,8 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "por_sku_tienda": por_sku,
         "detalle_dias": _detalle_dias(fu, en_alcance, jer),
         # El catálogo que resuelve la `j` de cada renglón: una lista de
-        # [sección, categoría, subcategoría, marca]. Va después de las dos
-        # listas que lo indexan porque se llena mientras se arman.
+        # [sección, categoría, subcategoría, marca, vía]. Va después de las
+        # dos listas que lo indexan porque se llena mientras se arman.
         "jerarquia": jer.combos,
         "proveedores": _proveedores_a_dict(fu, umbral_osa),
         "citas_falladas": [{
