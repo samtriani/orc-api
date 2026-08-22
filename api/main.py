@@ -42,7 +42,9 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse
+import orcmm_runs                                              # noqa: E402
 from psycopg2.extras import RealDictCursor
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -80,6 +82,15 @@ ORIGENES = [o.strip() for o in os.getenv("ORCMM_ORIGENES", ORIGENES_LOCALES).spl
 app = FastAPI(title="ORCMM — Clasificación de desabasto por causa raíz",
               version="3.0")
 
+# El resumen de una corrida real pesa 5.74 MB sin comprimir y 481 KB
+# comprimido: doce veces menos, medido sobre Coyoacán marzo. Iba en claro
+# hasta ahora, y ese tamaño es justo el que nos costó el spinner infinito
+# cuando la respuesta tardaba más que el intervalo del poll.
+#
+# minimum_size deja pasar sin tocar las respuestas chicas —el estado del
+# análisis son 111 bytes— donde comprimir costaría más CPU que el ahorro.
+app.add_middleware(GZipMiddleware, minimum_size=2048)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ORIGENES,
@@ -116,6 +127,12 @@ class Trabajo:
     etapa: Optional[str] = None
     futuro: Optional[Future] = None
     cancelado: bool = False
+
+    def transcurrido(self) -> float:
+        """Segundos EN LA FASE actual: desde que le dieron turno si ya
+        corre, o desde que se creó si sigue en cola. Es el mismo cálculo que
+        hacía el poll en dos lados; aquí vive una vez."""
+        return round(time.time() - (self.iniciado or self.creado), 1)
 
 
 TRABAJOS: Dict[str, Trabajo] = {}
@@ -158,7 +175,7 @@ def _rechazar_si_hay_activo() -> None:
         "mensaje": "Ya hay un análisis en curso. El servidor corre uno a la vez.",
         "id_activo": id_,
         "archivo": t.archivo,
-        "segundos": round(time.time() - (t.iniciado or t.creado), 1),
+        "segundos": t.transcurrido(),
     })
 
 
@@ -447,6 +464,15 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
             "nombre_salida": trabajo.nombre_descarga,
             **resumen,
         }
+
+        # Al histórico. Va DESPUÉS de dejar el trabajo en 'ok': si guardar
+        # falla, la corrida que costó minutos sigue estando disponible en
+        # esta pantalla; lo único que se pierde es poder volver a consultarla.
+        aviso = orcmm_runs.guardar(
+            id_, tienda, desde, hasta, resumen, umbral_osa,
+            segundos=trabajo.transcurrido(), origen="bd")
+        if aviso:
+            trabajo.resultado.setdefault("advertencias", []).append(aviso)
     except Exception as e:
         trabajo.estado = "error"
         trabajo.error = f"El análisis desde base de datos falló: {e}"
@@ -493,6 +519,59 @@ def _listar_tiendas() -> list:
     return [{**f, "fecha_min": f["fecha_min"].isoformat() if f["fecha_min"] else None,
              "fecha_max": f["fecha_max"].isoformat() if f["fecha_max"] else None}
             for f in filas]
+
+
+# ---------------------------------------------------------------------------
+# Histórico de corridas
+#
+# Una corrida completa tarda ~5.7 minutos. Guardarla y volver a leerla es la
+# diferencia entre esperar seis minutos y pintar la pantalla de inmediato.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/runs")
+async def runs(limite: int = Query(50, ge=1, le=200),
+               tienda: Optional[str] = None) -> dict:
+    """Las corridas ya hechas, lo más reciente primero.
+
+    Sin el resumen: son ~5 MB cada uno y aquí sólo se pinta un renglón por
+    corrida. El detalle se pide aparte.
+    """
+    try:
+        filas = await run_in_threadpool(orcmm_runs.listar, limite, tienda)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo leer el histórico de corridas: {e}")
+    return {"runs": filas}
+
+
+@app.get("/api/runs/{id_}")
+async def run(id_: str) -> dict:
+    """El resumen guardado de una corrida, listo para pintar.
+
+    Es el mismo cuerpo que /api/analizar/{id}/resumen, más un bloque
+    `guardado` con la procedencia: cuándo se corrió y con qué versión del
+    motor. La pantalla tiene que poder decir que esto salió del histórico y
+    no hacerlo pasar por un análisis recién hecho — sobre todo porque las
+    reglas cambian, y un resultado de hace un mes puede no coincidir con lo
+    que daría el motor de hoy.
+    """
+    try:
+        guardado = await run_in_threadpool(orcmm_runs.leer, id_)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo leer la corrida: {e}")
+    if guardado is None:
+        raise HTTPException(404, "Esa corrida no está en el histórico.")
+    return guardado
+
+
+@app.delete("/api/runs/{id_}")
+async def borrar_run(id_: str) -> dict:
+    try:
+        fue = await run_in_threadpool(orcmm_runs.borrar, id_)
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo borrar la corrida: {e}")
+    if not fue:
+        raise HTTPException(404, "Esa corrida no está en el histórico.")
+    return {"borrado": id_}
 
 
 @app.get("/api/tiendas")
@@ -579,7 +658,7 @@ def estado_analisis(id_: str) -> dict:
         cuerpo["fase"] = "en_cola" if en_cola else "corriendo"
         if trabajo.etapa and not en_cola:
             cuerpo["etapa"] = trabajo.etapa
-        cuerpo["segundos"] = round(time.time() - (trabajo.iniciado or trabajo.creado), 1)
+        cuerpo["segundos"] = trabajo.transcurrido()
         if en_cola:
             cuerpo["delante"] = sum(
                 1 for t in TRABAJOS.values()
