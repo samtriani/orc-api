@@ -55,8 +55,9 @@ from starlette.concurrency import run_in_threadpool
 # .env si está — no hace nada si el archivo no existe.
 load_dotenv()
 
-from api.servicio import analizar, escribir_excel, evidencia_y_dictamen
-from orcmm_pipeline import universo_osa, diagnosticar_layout               # noqa: E402
+from api.servicio import (analizar, diagnosticar_layout,             # noqa: E402
+                          escribir_excel, evidencia_y_dictamen)
+from orcmm_pipeline import universo_osa                              # noqa: E402
 from orcmm_db import conectar                                        # noqa: E402
 from orcmm_expediente_db import expediente_sku                       # noqa: E402
 from orcmm_fuentes_csv import hoja_de_archivo                        # noqa: E402
