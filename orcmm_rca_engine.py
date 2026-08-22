@@ -67,7 +67,7 @@ class SubcausaProveedor(str, Enum):
     La primera se negocia con el área de citas; la segunda es un problema de
     capacidad o de asignación del proveedor; la tercera es incumplimiento puro.
     """
-    SIN_CITA = "Nunca agendó cita para el pedido"
+    SIN_CITA = "El pedido no llegó a tener cita en CEDIS"
     CROSSDOCK_PEDIDO_TARDE = ("Entrega completa en crossdock; el pedido se "
                               "generó tarde para cubrir el consumo")
     CITA_PENDIENTE = "Cita agendada para después del día del faltante"
@@ -220,9 +220,46 @@ REFINAR_RC01_CON_ALERTA = True
 # cae la venta perdida en el Pareto.
 # ---------------------------------------------------------------------------
 
-# ¿De quién es un pedido que nunca llegó a tener cita? En el proceso de La
-# Comer el proveedor solicita la cita, así que por omisión es suyo. Si en
-# realidad la agenda Compras, cambiar a Responsable.COMPRAS_ABASTO.
+# ¿Un pedido sin cita es incumplimiento del proveedor?
+#
+# NO (decidido con La Comer, 2026-08-22). Estaba en Sí, y fabricaba culpables:
+#
+#   1. MEDIDO: 811,095 de 848,027 pedidos a CEDIS —el 95.6%— no tienen cita.
+#      Ningún proveedor opera así. Lo que pasa es que CITAS_PROV_CEDIS cubre
+#      febrero y marzo mientras COMPRAS va de mayo 2025 a junio 2026: "sin
+#      cita" es casi siempre un hueco de extracción, no una conducta.
+#
+#   2. Y hay una razón que no depende de los datos: derivar_orden_proveedor
+#      sólo elige pedidos que AÚN NO se han recibido al día D. Sin cita no hay
+#      fecha comprometida, así que el proveedor no ha incumplido nada — no se
+#      le puede cobrar un plazo que nadie fijó. Es el mismo principio que
+#      CLASIFICAR_CITA_PENDIENTE: mientras el compromiso no venza, no hay falta.
+#
+# Lo que sí se puede afirmar es que hay un pedido y no ha llegado, y que se
+# generó tarde para cubrir el consumo. Eso es RC05 y es de Compras/Abasto.
+#
+# A DÓNDE VAN ESOS DÍAS: a Compras (Samuel, 2026-08-22).
+#
+# Ojo con la procedencia, que no es la misma para las dos mitades: que NO sean
+# del proveedor lo sostiene lo de arriba, que es dato. Que sean de Compras es
+# una decisión del equipo, no algo que el dato demuestre — La Comer no lo ha
+# ratificado. Si alguien la discute, se discute como decisión y se cambia una
+# palabra; no hay que defenderla como si fuera medición.
+#
+# Por eso son tres opciones y no un booleano:
+#
+#   "proveedor"      RC06. El comportamiento hasta el 2026-08-22.
+#   "compras"        RC05. Afirma que la orden se generó tarde. Es coherente
+#                    con CLASIFICAR_CITA_PENDIENTE, que ya trata así al pedido
+#                    cuya cita aún no vence.
+#   "sin_clasificar" RC99. No afirma nada: sin cita no hay con qué juzgar a
+#                    nadie. Es la única que no puede equivocarse de culpable,
+#                    y el precio es que esos días salen sin explicar.
+#
+# Medido en Coyoacán marzo: son 4,178 días y $100,821. Con "proveedor" RC06
+# vale 4,570 días; con las otras dos, 392. No es un matiz.
+SIN_CITA_VA_A = "compras"
+
 RESPONSABLE_SIN_CITA = Responsable.PROVEEDOR
 
 # Faltante en tienda mientras el pedido a proveedor sigue en tiempo (su cita
@@ -661,10 +698,24 @@ class R7_R8_RamaProveedorCedis(Regla):
         pedidas = ev.proveedor_cajas_pedidas
 
         if not ev.proveedor_cita_agendada:
+            if SIN_CITA_VA_A == "proveedor":
+                return Dictamen(
+                    8, "RC06", CausaRaiz.RC06, RESPONSABLE_SIN_CITA,
+                    "Citas proveedor a CEDIS",
+                    base + ["El pedido no tiene cita agendada en CEDIS"],
+                    subcausa=SubcausaProveedor.SIN_CITA,
+                )
+            # Sin cita no hay fecha comprometida que el proveedor haya podido
+            # incumplir, y el pedido que se está mirando todavía no se recibe.
+            detalle = ("El pedido no tiene cita agendada en CEDIS: no hay compromiso "
+                       "de fecha que juzgar, y la orden sigue sin llegar")
+            if SIN_CITA_VA_A == "sin_clasificar":
+                return Indeterminado(8, ["cita_del_pedido_a_proveedor"], base + [detalle])
             return Dictamen(
-                8, "RC06", CausaRaiz.RC06, RESPONSABLE_SIN_CITA,
+                8, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
                 "Citas proveedor a CEDIS",
-                base + ["El pedido no tiene cita agendada en CEDIS"],
+                base + [detalle + ". Lo único que el dato sostiene es que se generó "
+                        "tarde para cubrir el consumo"],
                 subcausa=SubcausaProveedor.SIN_CITA,
             )
 
