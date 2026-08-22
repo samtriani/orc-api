@@ -574,22 +574,48 @@ def _buscar_skus(tienda: str, q: str, limite: int) -> list:
     Se resuelve aquí, contra Postgres, al escribir. Cuesta cero de payload y
     funciona igual con un catálogo de cien mil claves.
 
-    Busca por código Y por descripción, sin acentos: el catálogo escribe
-    "CAFÉ" y la gente teclea "cafe".
+    Busca PALABRA POR PALABRA, no la frase completa: cada término tiene que
+    aparecer en el código o en la descripción, en cualquier orden. Buscar la
+    frase entera como una sola cadena fallaba con lo más normal del mundo —
+    "agua natural bonafon 7" no encuentra "AGUA NATURAL BONAFONT 750 ML",
+    porque después de "bonafon" viene una "t" y no un espacio—. Así se
+    aguantan las palabras a medias, el orden cambiado y los espacios de más.
+
+    Y sin acentos: el catálogo escribe "CAFÉ" y la gente teclea "cafe".
     """
+    palabras = [p for p in q.split() if p][:8]      # tope: 8 términos bastan
+    if not palabras:
+        return []
+
+    condicion = " AND ".join(
+        ["(sku LIKE %s OR unaccent(lower(descripcion)) LIKE unaccent(lower(%s)))"]
+        * len(palabras))
+    # Ranking: primero cuántas palabras empatan en el NOMBRE. Sin esto, un
+    # término corto como "7" cuela cualquier SKU que lleve un siete en el
+    # código, y "agua natural bonafon 7" enterraba al de 750 ML debajo del de
+    # 1 LT y el de 2 LT. Empatados, gana el nombre más corto: entre el
+    # producto y su versión con empaque y promoción, casi siempre es el que
+    # se buscaba.
+    puntaje = " + ".join(
+        ["(unaccent(lower(descripcion)) LIKE unaccent(lower(%s)))::int"] * len(palabras))
+
+    params: list = [tienda]
+    for p in palabras:
+        params += [f"%{p}%", f"%{p}%"]
+    params += [f"%{p}%" for p in palabras]
+    params.append(limite)
+
     with conectar() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT sku, descripcion
                 FROM catalogo
-                WHERE tienda = %s
-                  AND (sku LIKE %s
-                       OR unaccent(lower(descripcion)) LIKE unaccent(lower(%s)))
-                ORDER BY descripcion
+                WHERE tienda = %s AND {condicion}
+                ORDER BY ({puntaje}) DESC, length(descripcion), descripcion
                 LIMIT %s
                 """,
-                (tienda, f"%{q}%", f"%{q}%", limite),
+                params,
             )
             return [dict(f) for f in cur.fetchall()]
 
