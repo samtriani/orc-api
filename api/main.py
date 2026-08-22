@@ -54,7 +54,7 @@ from starlette.concurrency import run_in_threadpool
 # .env si está — no hace nada si el archivo no existe.
 load_dotenv()
 
-from api.servicio import analizar, diagnosticar_layout               # noqa: E402
+from api.servicio import analizar, escribir_excel, diagnosticar_layout               # noqa: E402
 from orcmm_db import conectar                                        # noqa: E402
 from orcmm_expediente_db import expediente_sku                       # noqa: E402
 from orcmm_fuentes_csv import hoja_de_archivo                        # noqa: E402
@@ -442,7 +442,11 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
         fu = leer_fuentes_db(tienda, desde, hasta, umbral_osa, avisar=marcar)
         trabajo.nombre_descarga = f"Resultado RCA - tienda {tienda}.xlsx"
         salida = trabajo.carpeta / "resultado.xlsx"
-        resumen = analizar(None, salida, umbral_osa, fu=fu, avisar=marcar)
+        # SIN el Excel: la pantalla se pinta con esto y el archivo se escribe
+        # después. Medido en Coyoacán, el Excel son ~287 s de los ~342 que
+        # tardaba la corrida completa. Ver escribir_excel.
+        resumen = analizar(None, salida, umbral_osa, fu=fu, avisar=marcar,
+                           con_excel=False)
 
         # El front espera 'validacion'/'correccion' siempre presentes (mismas
         # claves que _correr ya manda) — aquí van vacías porque no hay
@@ -455,7 +459,6 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
                                  "correccion": None, **resumen}
             return
 
-        trabajo.salida = salida
         trabajo.estado = "ok"
         trabajo.resultado = {
             "archivo": trabajo.archivo,
@@ -473,6 +476,23 @@ def _correr_desde_bd(id_: str, tienda: str, desde: date, hasta: date,
             segundos=trabajo.transcurrido(), origen="bd")
         if aviso:
             trabajo.resultado.setdefault("advertencias", []).append(aviso)
+
+        # Y AHORA el Excel, con el resultado ya servido. La pantalla lleva
+        # minutos pintada mientras esto corre; `trabajo.salida` se pone hasta
+        # el final para que la descarga no entregue un archivo a medio
+        # escribir. Si truena, el análisis sigue siendo válido: lo único que
+        # se pierde es el botón de descarga, y se dice.
+        try:
+            trabajo.etapa = "generando el Excel de resultados"
+            escribir_excel(fu, salida, umbral_osa)
+            trabajo.salida = salida
+        except Exception as e:
+            trabajo.resultado.setdefault("advertencias", []).append(
+                f"El análisis terminó bien, pero no se pudo generar el Excel ({e}). "
+                f"Las cifras de esta pantalla son válidas; sólo no hay archivo que "
+                f"descargar.")
+        finally:
+            trabajo.etapa = None
     except Exception as e:
         trabajo.estado = "error"
         trabajo.error = f"El análisis desde base de datos falló: {e}"
@@ -725,7 +745,18 @@ def resumen_analisis(id_: str) -> dict:
 def descargar(id_: str) -> FileResponse:
     """Entrega el Excel de resultados del análisis."""
     trabajo = TRABAJOS.get(id_)
-    if trabajo is None or trabajo.salida is None or not trabajo.salida.exists():
+    if trabajo is None:
+        raise HTTPException(404, "Ese resultado ya no está disponible. Hay que volver "
+                                 "a subir el paquete.")
+    # El Excel se escribe DESPUÉS de servir el resultado, así que hay una
+    # ventana de varios minutos en la que el análisis ya está en pantalla y el
+    # archivo todavía no existe. Es un estado legítimo, no un error: 409 y se
+    # dice, en vez de un 404 que suena a "se perdió".
+    if trabajo.salida is None or not trabajo.salida.exists():
+        if trabajo.estado == "ok":
+            raise HTTPException(409, "El Excel todavía se está generando. Son unos "
+                                     "minutos: las cifras de la pantalla ya son las "
+                                     "definitivas, el archivo va detrás.")
         raise HTTPException(404, "Ese resultado ya no está disponible. Hay que volver "
                                  "a subir el paquete.")
     return FileResponse(trabajo.salida, media_type=XLSX,

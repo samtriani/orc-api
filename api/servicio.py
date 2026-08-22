@@ -314,16 +314,41 @@ def _detalle_dias(fu: Fuentes, en_alcance: List[dict], jer: IndiceJerarquia) -> 
     }
 
 
-def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
-             csvs=None, fu: Optional[Fuentes] = None, avisar=None) -> dict:
-    """Corre el pipeline completo y devuelve el resumen que ve la pantalla.
+def escribir_excel(fu: Fuentes, salida: Path, umbral_osa: float = 100.0,
+                   avisar=None) -> bool:
+    """Escribe el Excel de resultados a partir de un `Fuentes` ya leído.
 
-    Es la misma pasada que produce el Excel: se lee una vez, se clasifica una
-    vez y de ahí salen las dos salidas.
+    Existe para poder sacar el Excel de la corrida. Medido sobre Coyoacán
+    marzo: leer las fuentes son 54 s, clasificar 1 s y escribir el Excel
+    ~287 s. O sea que el 82% de cada análisis se iba en generar un archivo de
+    16 MB que muchas veces nadie abre, mientras la pantalla esperaba.
+
+    Rehace la evidencia y la clasificación en vez de arrastrarlas desde
+    `analizar`: es un segundo sobre 44 mil evidencias, y no vale la pena
+    mantener 44 mil objetos vivos entre las dos llamadas para ahorrarlo.
+
+    Devuelve False si no había nada que escribir.
+    """
+    evidencias = derivar_evidencias(fu, umbral_osa)
+    if not evidencias:
+        return False
+    _avisar(avisar, "generando el Excel de resultados")
+    escribir_resultado(salida, fu, evidencias, clasificar(evidencias), umbral_osa)
+    return True
+
+
+def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
+             csvs=None, fu: Optional[Fuentes] = None, avisar=None,
+             con_excel: bool = True) -> dict:
+    """Corre el pipeline y devuelve el resumen que ve la pantalla.
 
     Si `fu` ya viene armado (p. ej. desde orcmm_fuentes_db.leer_fuentes_db,
     con datos de Postgres en vez de un archivo) se usa tal cual y `ruta`/
     `csvs` se ignoran — todo lo de aquí en adelante sólo lee de `Fuentes`.
+
+    `con_excel=False` devuelve el resumen sin escribir el archivo, para que la
+    pantalla no espere los ~287 s que cuesta. Quien lo pase tiene que llamar
+    después a escribir_excel() si quiere la descarga.
     """
     fu = fu or leer_fuentes(PaqueteFuentes.desde(ruta, csvs or []), umbral_osa)
     _avisar(avisar, "derivando la evidencia de cada día")
@@ -343,8 +368,13 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
 
     _avisar(avisar, "clasificando por causa raíz")
     diagnosticos = clasificar(evidencias)
-    _avisar(avisar, "generando el Excel de resultados")
-    cob, _ = escribir_resultado(salida, fu, evidencias, diagnosticos, umbral_osa)
+    # La cobertura se calcula aquí y no se recibe del escritor del Excel: eran
+    # el mismo número, pero pedírselo a él ataba el resumen a que el archivo
+    # se generara, que es justo lo que con_excel viene a desatar.
+    cob = cobertura_modelo(diagnosticos)
+    if con_excel:
+        _avisar(avisar, "generando el Excel de resultados")
+        escribir_resultado(salida, fu, evidencias, diagnosticos, umbral_osa)
 
     # El Pareto y el detalle por SKU van sobre el alcance; la cobertura sigue
     # contando todo y reporta los días fuera de catálogo aparte. Mismo criterio
