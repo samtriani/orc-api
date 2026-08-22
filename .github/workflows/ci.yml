@@ -1,0 +1,55 @@
+# CI de orc-api.
+#
+# Nace de un error concreto: un import roto llegó a main y la API no
+# levantaba. Se había validado con `compileall`, que sólo revisa SINTAXIS —
+# un `from x import y` que no resuelve compila perfecto. La comprobación
+# buena es importar la app, y eso es lo que hace este workflow.
+#
+# Rápido a propósito (~30 s): si tarda, se ignora.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # 1. Sintaxis. Barato y atrapa lo tonto.
+      - name: Compilar
+        run: python -m compileall -q api orcmm_*.py
+
+      # 2. Lo que compileall NO ve: que los imports resuelvan y la app se
+      #    construya. Sin base de datos — la app no la toca al importarse, y
+      #    exigir una aquí volvería el CI frágil por algo que no es su trabajo.
+      - name: Levantar la app
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
+        run: |
+          python - <<'PY'
+          from api.main import app
+          rutas = {r.path for r in app.routes if hasattr(r, "path")}
+          faltan = {"/api/salud", "/api/analizar", "/api/analizar-tienda",
+                    "/api/runs", "/api/runs/{id_}", "/api/tiendas",
+                    "/api/skus"} - rutas
+          assert not faltan, f"faltan endpoints: {sorted(faltan)}"
+          print(f"la app carga con {len(rutas)} rutas")
+          PY
+
+      # 3. Las reglas del motor, sin tocar Postgres. Es donde vive el valor
+      #    del proyecto: si la matriz cambia de veredicto sin querer, aquí se
+      #    ve antes de que salga en un Pareto frente al cliente.
+      - name: Prueba de humo del motor
+        run: python scripts/humo_motor.py

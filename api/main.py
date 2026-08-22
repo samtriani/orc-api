@@ -563,6 +563,47 @@ def _listar_tiendas() -> list:
 # diferencia entre esperar seis minutos y pintar la pantalla de inmediato.
 # ---------------------------------------------------------------------------
 
+def _buscar_skus(tienda: str, q: str, limite: int) -> list:
+    """SKU del catálogo de una tienda que empatan con el texto buscado.
+
+    Existe por los SANOS. `por_sku_tienda` sólo trae los SKU que tuvieron
+    faltante —en Coyoacán, 3,524 de 10,454— así que el autocompletar de la
+    pantalla no podía ofrecer los otros 6,930 por nombre: sus descripciones no
+    viajan en la respuesta, y mandarlas costaría 552 KB.
+
+    Se resuelve aquí, contra Postgres, al escribir. Cuesta cero de payload y
+    funciona igual con un catálogo de cien mil claves.
+
+    Busca por código Y por descripción, sin acentos: el catálogo escribe
+    "CAFÉ" y la gente teclea "cafe".
+    """
+    with conectar() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT sku, descripcion
+                FROM catalogo
+                WHERE tienda = %s
+                  AND (sku LIKE %s
+                       OR unaccent(lower(descripcion)) LIKE unaccent(lower(%s)))
+                ORDER BY descripcion
+                LIMIT %s
+                """,
+                (tienda, f"%{q}%", f"%{q}%", limite),
+            )
+            return [dict(f) for f in cur.fetchall()]
+
+
+@app.get("/api/skus")
+async def skus(tienda: str, q: str = Query(..., min_length=2),
+               limite: int = Query(25, ge=1, le=100)) -> dict:
+    """Autocompletar de SKU contra el catálogo, no contra el resultado."""
+    try:
+        return {"skus": await run_in_threadpool(_buscar_skus, tienda, q, limite)}
+    except Exception as e:
+        raise HTTPException(503, f"No se pudo buscar en el catálogo: {e}")
+
+
 @app.get("/api/runs")
 async def runs(limite: int = Query(50, ge=1, le=200),
                tienda: Optional[str] = None) -> dict:
