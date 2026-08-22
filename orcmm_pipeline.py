@@ -33,6 +33,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from orcmm_xlsx import Libro
 from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
                                llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
@@ -1558,7 +1559,7 @@ def escribir_hoja_proveedor(wb, fu, diagnosticos: List[dict],
     no hay fuentes que recorrer, pero las tres listas quedaron tal cual en el
     resumen. Ver orcmm_runs.regenerar_excel.
     """
-    ws = wb.create_sheet("Proveedor y citas")
+    ws = wb.hoja("Proveedor y citas")
     ws.sheet_view.showGridLines = False
     for j, w in enumerate([3, 30, 9, 11, 13, 8, 10, 13, 11, 12, 13, 13, 12, 13], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
@@ -1698,7 +1699,10 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
     al detalle diario, así que un Fuentes reconstruido no lo puede dar.
     """
     pre = precalculado or {}
-    wb = openpyxl.Workbook()
+    # Streaming, no openpyxl: la hoja diaria trae 4.5 millones de celdas y
+    # armarlas como objetos costaba 263 s y 3 GB. Ver orcmm_xlsx — la lógica
+    # de abajo no cambia, sólo el motor que la escribe.
+    wb = Libro(ruta)
     aviso = aviso_prioridad_3(fu)
 
     # El Pareto y el detalle por SKU se calculan sobre el alcance; la
@@ -1707,8 +1711,8 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
     en_alcance = dentro_del_alcance(diagnosticos)
 
     # --- Clasificación diaria --------------------------------------------
-    ws = wb.active
-    ws.title = "Clasificacion diaria"
+    # La única en streaming: sus renglones se escriben y se olvidan.
+    ws = wb.hoja("Clasificacion diaria", streaming=True)
     ws.sheet_view.showGridLines = False
     for j, w in enumerate([16, 9, 12, 8, 13, 11, 10, 11, 12, 8, 11, 11, 10, 10, 12, 11, 10,
                            8, 26, 20, 30, 10, 26, 60], 1):
@@ -1762,7 +1766,7 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
     ws.auto_filter.ref = f"A4:X{4 + len(evidencias)}"
 
     # --- Pareto -----------------------------------------------------------
-    ws = wb.create_sheet("Pareto")
+    ws = wb.hoja("Pareto")
     ws.sheet_view.showGridLines = False
     for col, w in zip("ABCDEF", [4, 40, 12, 18, 14, 26]):
         ws.column_dimensions[col].width = w
@@ -1849,7 +1853,7 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
 
     # --- Por SKU-Tienda ---------------------------------------------------
     # Es la lista accionable: qué combinación está costando más y de quién es.
-    ws = wb.create_sheet("Por SKU-Tienda")
+    ws = wb.hoja("Por SKU-Tienda")
     ws.sheet_view.showGridLines = False
     for j, w in enumerate([16, 9, 12, 12, 11, 15, 11, 15, 8, 26, 20, 60], 1):
         ws.column_dimensions[get_column_letter(j)].width = w
@@ -1900,7 +1904,7 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
     escribir_hoja_proveedor(wb, fu, en_alcance, proveedores, citas, discrepancias)
 
     # --- Cobertura y fuentes ---------------------------------------------
-    ws = wb.create_sheet("Cobertura y fuentes")
+    ws = wb.hoja("Cobertura y fuentes")
     ws.sheet_view.showGridLines = False
     for col, w in zip("ABCDEF", [4, 34, 14, 16, 16, 54]):
         ws.column_dimensions[col].width = w
@@ -2024,7 +2028,7 @@ def escribir_resultado(ruta: Path, fu, evidencias, diagnosticos: List[dict],
             ws.merge_cells(start_row=f, start_column=2, end_row=f, end_column=6)
             f += 1
 
-    wb.save(ruta)
+    wb.cerrar()
     return cob, par
 
 
