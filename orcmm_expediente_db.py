@@ -16,9 +16,11 @@ from datetime import date
 from typing import Optional
 
 from orcmm_fuentes_db import leer_fuentes_db
-from orcmm_pipeline import (OrdenProveedor, _osa_pct, derivar_envio_generado,
+from orcmm_pipeline import (VIAS, OrdenProveedor, _osa_pct, clave_catalogo,
+                             derivar_envio_generado,
                              derivar_evidencias, derivar_orden_proveedor, derivar_pedido_tienda,
                              derivar_transito_vigente)
+from orcmm_rca_engine import ViaResurtido
 from orcmm_rca_periodo import clasificar
 
 
@@ -50,6 +52,7 @@ def expediente_sku(tienda: str, sku: str, desde: date, hasta: date,
 
     cat = fu.catalogo.get((sku, tienda), {})
     cedis = cat.get("cedis_surtidor")
+    via = VIAS.get(clave_catalogo(cat.get("via_resurtido")))
 
     fechas = sorted({d for (_, _, d) in fu.osa} | {d for (_, _, d) in fu.inv_tienda})
     dias = []
@@ -81,7 +84,23 @@ def expediente_sku(tienda: str, sku: str, desde: date, hasta: date,
     return {
         "sku": sku,
         "tienda": tienda,
+        # El nombre comercial. La clave sola —"Tienda 287"— no le dice nada a
+        # quien lee el reporte; el nombre sí, y de paso identifica el formato
+        # (La Comer, City Market, Fresko, Sumesa).
+        "tienda_nombre": cat.get("nombre_tienda"),
         "descripcion": cat.get("descripcion"),
+        "via_resurtido": via.value if via else None,
+        # ¿Tiene sentido dibujar el inventario de CEDIS para este SKU?
+        #
+        # Sólo en Vía 1, que es donde el CEDIS RESGUARDA producto. En Vía 2
+        # hace crossdock —recibe y despacha el mismo día— así que su
+        # existencia es cero o ruido por diseño, y la gráfica hacía pensar que
+        # el CEDIS estaba desabastecido cuando es su operación normal. En DSD
+        # el proveedor entrega directo en la sucursal y el CEDIS ni participa.
+        #
+        # La decisión se toma aquí y no en el front porque es semántica de la
+        # vía de resurtido, no una preferencia de dibujo.
+        "cedis_resguarda": via is ViaResurtido.VIA_1,
         "desde": desde.isoformat(),
         "hasta": hasta.isoformat(),
         "dias": dias,
