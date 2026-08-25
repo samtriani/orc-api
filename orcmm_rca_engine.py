@@ -38,14 +38,16 @@ class CausaRaiz(str, Enum):
     # tienda": el pedido va de la sucursal al CEDIS.
     RC03 = "Pedido de tienda no generado"
     RC04 = "CEDIS No Surtió"
-    # "tardío o no generado" porque la causa cubre las dos cosas, y el nombre
-    # viejo —"Pedido Proveedor No Generado"— se contradecía con su propia
-    # evidencia: la mayoría de estos días SÍ tienen folio de pedido, lo que
-    # pasa es que se generó tarde para cubrir el consumo. Quien abría el Excel
-    # veía "no generado" al lado del número de pedido y dejaba de creerle al
-    # reporte. El responsable no cambia; sólo deja de negar lo que se ve.
-    RC05 = "Pedido a proveedor tardío o no generado"
+    # RC05 vuelve a significar exactamente lo que su nombre siempre dijo: NO
+    # HAY pedido vigente al proveedor ese día. Los días en que sí lo hay —pero
+    # con vigencia posterior, o sea que el proveedor todavía tiene plazo— se
+    # fueron a RC07. Ver SEPARAR_PEDIDO_TARDIO.
+    RC05 = "Pedido a proveedor no generado"
     RC06 = "Incumplimiento Proveedor"
+    # Existe pedido al proveedor y su vigencia vence DESPUÉS del día evaluado:
+    # el proveedor aún está en plazo, así que el faltante no es suyo — el
+    # pedido se colocó tarde para cubrir el consumo de ese día.
+    RC07 = "Pedido a proveedor tardío"
     RC99 = "Sin clasificar"
 
 
@@ -265,6 +267,43 @@ REFINAR_RC01_CON_ALERTA = True
 # Medido en Coyoacán marzo: son 4,178 días y $100,821. Con "proveedor" RC06
 # vale 4,570 días; con las otras dos, 392. No es un matiz.
 SIN_CITA_VA_A = "compras"
+
+# ---------------------------------------------------------------------------
+# SEPARAR "TARDÍO" DE "NO GENERADO"   (La Comer, 2026-08-22)
+#
+# RC05 venía cargando dos cosas que no son la misma, y el nombre lo delataba
+# —"tardío o no generado"—. Medido en Coyoacán marzo, de sus 5,850 días:
+#
+#     538 días  ($9,716)    NO existe pedido vigente al proveedor ese día.
+#   5,312 días ($130,046)   SÍ existe, y su vigencia vence DESPUÉS del día
+#                           evaluado: el proveedor todavía tiene plazo.
+#
+# O sea que el 91% de lo que decía "no generado" sí tenía folio de pedido. Son
+# conversaciones distintas: una es "no lo pidieron", la otra "lo pidieron
+# tarde". El responsable es el mismo —Compras/Abasto— así que el Pareto por
+# responsable no se mueve ni un día; lo que cambia es qué se le reclama.
+#
+# El corte no hubo que inventarlo: derivar_orden_proveedor ya sólo considera
+# pedidos con fecha de recibo posterior al día, así que "existe pedido" y
+# "está en plazo" son la misma condición.
+#
+# RC05 se queda con "no generado" a propósito, aunque sea el bloque chico: es
+# lo que su nombre significó siempre, y así quien compare contra un reporte
+# entregado está comparando el mismo concepto.
+#
+# En False todo vuelve a RC05 y el reporte se lee como antes del 2026-08-22.
+SEPARAR_PEDIDO_TARDIO = True
+
+
+def _tardio():
+    """El par (código, causa) para un día con pedido vigente pero en plazo.
+
+    Se resuelve aquí y no en cada regla para que las tres salidas de la
+    prioridad 8 no puedan quedar desalineadas si alguien apaga el
+    interruptor: o las tres van a RC07, o las tres vuelven a RC05.
+    """
+    return (("RC07", CausaRaiz.RC07) if SEPARAR_PEDIDO_TARDIO
+            else ("RC05", CausaRaiz.RC05))
 
 RESPONSABLE_SIN_CITA = Responsable.PROVEEDOR
 
@@ -717,8 +756,9 @@ class R7_R8_RamaProveedorCedis(Regla):
                        "de fecha que juzgar, y la orden sigue sin llegar")
             if SIN_CITA_VA_A == "sin_clasificar":
                 return Indeterminado(8, ["cita_del_pedido_a_proveedor"], base + [detalle])
+            rc, causa = _tardio()
             return Dictamen(
-                8, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
+                8, rc, causa, Responsable.COMPRAS_ABASTO,
                 "Citas proveedor a CEDIS",
                 base + [detalle + ". Lo único que el dato sostiene es que se generó "
                         "tarde para cubrir el consumo"],
@@ -734,8 +774,9 @@ class R7_R8_RamaProveedorCedis(Regla):
             if not CLASIFICAR_CITA_PENDIENTE:
                 return Indeterminado(
                     8, ["regla_matriz_para_cita_de_proveedor_no_vencida"], base + [detalle])
+            rc, causa = _tardio()
             return Dictamen(
-                8, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
+                8, rc, causa, Responsable.COMPRAS_ABASTO,
                 "Citas proveedor a CEDIS",
                 base + [detalle + ". El pedido se generó tarde para cubrir el consumo"],
                 subcausa=SubcausaProveedor.CITA_PENDIENTE,
@@ -796,8 +837,9 @@ class R7_R8_RamaProveedorCedis(Regla):
             return None
         if ev.via_resurtido is not ViaResurtido.VIA_2:
             return None
+        rc, causa = _tardio()
         return Dictamen(
-            8, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
+            8, rc, causa, Responsable.COMPRAS_ABASTO,
             "Citas proveedor a CEDIS",
             evidencia + ["Vía 2 (crossdock): el CEDIS no resguarda inventario, "
                          "así que el cero es normal. El pedido se generó tarde "

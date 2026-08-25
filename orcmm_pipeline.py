@@ -50,8 +50,11 @@ AMARILLO, GRIS, AZUL, AMBAR, VERDE, ROJO = "FFE600", "F2F2F2", "DDEBF7", "FFEB9C
 # Fuera de alcance: lila pálido. No puede ser otro gris — junto al de
 # RC99 no se distinguirían, que es justo lo que se quiere separar.
 LILA = "E6E0F0"
+# RC07 va en ámbar y no en rojo a propósito: "lo pidieron tarde" es más suave
+# que "no lo pidieron", y el color lo dice sin tener que leer la etiqueta.
 COLOR_CAUSA = {"RC00": LILA, "RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
-               "RC04": AMBAR, "RC05": ROJO, "RC06": ROJO, "RC99": GRIS}
+               "RC04": AMBAR, "RC05": ROJO, "RC06": ROJO, "RC07": AMBAR,
+               "RC99": GRIS}
 
 NEGRITA = Font(bold=True)
 TITULO = Font(bold=True, size=14)

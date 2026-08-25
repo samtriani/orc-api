@@ -16,12 +16,14 @@ from orcmm_rca_engine import EvidenciaSKUTienda, MotorRCA, TipoResurtido, ViaRes
 
 MOTOR = MotorRCA()
 FALLOS = []
+CASOS = [0]      # se cuenta solo: el numero fijo se desfasaba al agregar casos
 
 
 def caso(nombre, esperado_rc, esperado_resp=None, **campos):
     campos.setdefault("en_catalogo", True)
     ev = EvidenciaSKUTienda(sku="X", tienda="287", fecha=date(2026, 3, 20),
                             osa=0.0, venta_perdida=100.0, **campos)
+    CASOS[0] += 1
     d = MOTOR.diagnosticar(ev)
     rc = d.get("root_cause_id")
     resp = d.get("responsable")
@@ -60,8 +62,18 @@ caso("CEDIS tenía y no envió -> CEDIS", "RC04", "CEDIS",
 # inventario en CEDIS no basta para culpar a CEDIS.
 caso("CEDIS tenía y SÍ envió -> transporte", "RC02", "Logística",
      **comun, inventario_cedis=50, envio_cedis_generado=True)
-caso("CEDIS en cero y sin pedido a proveedor -> RC05", "RC05", "Compras / Abasto",
+# La costura entre RC05 y RC07: NO hay pedido vigente contra SI hay pero en
+# plazo. Es la separacion que pidio La Comer el 2026-08-22, y es justo donde
+# alguien podria volver a juntarlas sin darse cuenta.
+caso("Sin pedido a proveedor -> RC05 no generado", "RC05", "Compras / Abasto",
      **comun, inventario_cedis=0, pedido_proveedor_generado=False)
+caso("Con pedido y cita aun por vencer -> RC07 tardio", "RC07", "Compras / Abasto",
+     **comun, inventario_cedis=0, pedido_proveedor_generado=True,
+     proveedor_cajas_pedidas=10, proveedor_cita_agendada=True,
+     proveedor_cita_vencida=False)
+caso("Con pedido y sin cita -> RC07 tardio", "RC07", "Compras / Abasto",
+     **comun, inventario_cedis=0, pedido_proveedor_generado=True,
+     proveedor_cajas_pedidas=10, proveedor_cita_agendada=False)
 
 print("\nRama DSD — estaba muerta hasta el 2026-08-21")
 dsd = dict(inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=True,
@@ -81,4 +93,5 @@ if FALLOS:
     for f in FALLOS:
         print("   -", f)
     sys.exit(1)
-print(f"\nOK — {12 - len(FALLOS)} veredictos del motor sin cambios")
+print()
+print(f"OK - {CASOS[0]} veredictos del motor sin cambios")
