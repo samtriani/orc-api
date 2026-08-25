@@ -38,7 +38,7 @@ from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
                                llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
                                ORIGEN_CENTRALIZADO, normalizar_encabezado)
-from orcmm_rca_engine import (EVALUAR_PEDIDO_TIENDA, EXCLUIR_SKU_SIN_SIMA,
+from orcmm_rca_engine import (CausaRaiz, EVALUAR_PEDIDO_TIENDA, EXCLUIR_SKU_SIN_SIMA,
                               FUERA_DE_CATALOGO, SIN_DATO_SIMA,
                               EvidenciaSKUTienda, TipoResurtido, ViaResurtido)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
@@ -287,6 +287,25 @@ def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
         ids[causa] = dg["root_cause_id"]
         resp[causa] = dg["responsable"]
 
+    # La taxonomía COMPLETA, aunque una causa no haya ocurrido. Antes sólo se
+    # dibujaban las causas con días, así que la gráfica cambiaba de renglones
+    # entre tiendas y entre periodos y no se podía comparar de un vistazo: que
+    # RC04 no aparezca no se distingue de que RC04 no exista. Un cero es
+    # información — dice que esa parte de la cadena no falló.
+    #
+    # RC99 va sólo si tiene días: no es una causa, es la ausencia de una, y un
+    # renglón fijo de "Sin clasificar: 0.00 pp" se leería como si el modelo
+    # tuviera una deuda permanente.
+    for c in CausaRaiz:
+        if c is CausaRaiz.RC99 or c.value in dias:
+            continue
+        dias[c.value] = 0
+        ids[c.value] = c.name
+        # Sin días no hay a quién señalar: el responsable de varias causas
+        # depende de la evidencia del día (RC03 va a Compras o a Tienda según
+        # el tipo de resurtido), así que inventarlo aquí sería adivinar.
+        resp[c.value] = None
+
     escalones = [{
         "root_cause_id": ids[c],
         "causa": c,
@@ -294,7 +313,9 @@ def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
         "dias": dias[c],
         "puntos_osa": round(dias[c] / universo * 100, 2),
     } for c in dias]
-    escalones.sort(key=lambda e: -e["puntos_osa"])
+    # Mayor impacto primero; entre las que empatan en cero, por código, para
+    # que el orden no baile entre corridas.
+    escalones.sort(key=lambda e: (-e["puntos_osa"], e["root_cause_id"]))
 
     return {
         "osa_teorico": 100.0,
