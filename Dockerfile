@@ -20,12 +20,22 @@ COPY orcmm_*.py ./
 COPY api/ ./api/
 
 # El commit con el que se construyó la imagen. Dentro del contenedor no hay
-# repo git que preguntar, así que si esto no llega, cada corrida queda sellada
-# como "desconocida" —o peor, con un sha viejo si alguien lo puso a mano una
-# vez y nadie lo volvió a tocar—. Y ese sello es lo que permite explicar por
-# qué dos corridas del mismo periodo no cuadran: las reglas cambian.
+# repo git que preguntar, y ese sello es lo que permite explicar por qué dos
+# corridas del mismo periodo no cuadran: las reglas cambian.
 #
-# Lo inyecta scripts/deploy.sh; no desplegar a mano sin él.
+# Viaja como ARCHIVO y no como build-arg. El 2026-08-27 se descubrió que el
+# `--build-arg` de deploy.sh ya no llegaba al builder —flyctl construye con
+# Depot— y, como el ARG tenía valor por omisión, la imagen se siguió
+# construyendo sin ruido con un sha de doce días antes. Un archivo va dentro
+# del contexto de build: si su contenido cambia, esta capa se reconstruye, y
+# si falta, el build FALLA aquí en vez de mentir.
+#
+# Lo escribe scripts/deploy.sh. Si este COPY revienta, es que se desplegó a
+# mano: usar el script.
+COPY VERSION ./
+
+# Se queda como último recurso, para máquinas donde el sello se ponga por
+# ambiente. version_motor() prefiere el archivo.
 ARG ORCMM_VERSION=desconocida
 ENV ORCMM_VERSION=$ORCMM_VERSION
 

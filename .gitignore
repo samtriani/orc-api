@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
 
+# Sello de commit que escribe scripts/deploy.sh justo antes de construir la
+# imagen. Es un derivado de HEAD; versionarlo lo dejaría siempre desfasado y,
+# peor, ensuciaría el árbol y el propio script se negaría a desplegar.
+VERSION
+
 # Credenciales locales (connection strings, tokens). Nunca se sube.
 .env
 

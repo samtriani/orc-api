@@ -23,6 +23,13 @@ fi
 SHA="$(git rev-parse --short HEAD)"
 echo "Desplegando $SHA"
 
+# El sello viaja como archivo dentro del contexto de build. Antes iba como
+# --build-arg y el 2026-08-27 se vio que ya no llegaba al builder: la imagen
+# llevaba doce días sellándose con un commit viejo sin decir nada. Ver el
+# comentario del Dockerfile. VERSION está en .gitignore, así que escribirlo
+# no ensucia el árbol ni dispara la comprobación de arriba.
+echo "$SHA" > VERSION
+
 # --ha=false: UNA sola máquina. El índice de trabajos vive en memoria del
 # proceso, así que con dos la descarga puede caer en la que no corrió el
 # análisis. Ver el comentario de fly.toml.
@@ -30,4 +37,14 @@ flyctl deploy --ha=false --build-arg "ORCMM_VERSION=$SHA" "$@"
 
 echo
 echo "Verificando..."
-curl -fsS "https://orc-api.fly.dev/api/salud" && echo
+SALUD="$(curl -fsS "https://orc-api.fly.dev/api/salud")"
+echo "$SALUD"
+
+# Que el sello llegó. Sin esto, la vez pasada nadie se enteró en doce días.
+if ! echo "$SALUD" | grep -q "\"version\":\"$SHA\""; then
+    echo
+    echo "El sello desplegado NO es $SHA. Las corridas quedarán marcadas con"
+    echo "un commit que no es el que corre. Ver version_motor() y el Dockerfile."
+    exit 1
+fi
+echo "Sello verificado: $SHA"

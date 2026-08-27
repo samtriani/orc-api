@@ -342,7 +342,11 @@ async def _recibir(archivos: List[UploadFile]) -> tuple[str, Paquete]:
 
 @app.get("/api/salud")
 def salud() -> dict:
+    # La versión va aquí para que el despliegue pueda comprobar que el sello
+    # llegó, sin entrar por SSH. Es el mismo valor con el que se marcan las
+    # corridas, así que si esto miente, mienten los registros guardados.
     return {"estado": "ok", "trabajos_en_memoria": len(TRABAJOS),
+            "version": orcmm_runs.version_motor(),
             "origenes_permitidos": ORIGENES}
 
 

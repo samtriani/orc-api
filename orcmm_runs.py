@@ -45,9 +45,19 @@ def version_motor() -> str:
     """El commit con el que corre este proceso.
 
     Se pregunta a git una sola vez y se recuerda: es la misma respuesta toda
-    la vida del proceso. En un contenedor sin repo cae a la variable de
-    entorno que inyecta el despliegue, y si tampoco está, a "desconocida" —
-    que es feo pero honesto, y mejor que inventar un valor.
+    la vida del proceso. En un contenedor no hay repo que preguntar, así que
+    cae al archivo VERSION que scripts/deploy.sh escribe en el contexto de
+    build; luego a la variable de entorno; y si nada de eso está, a
+    "desconocida" — que es feo pero honesto, y mejor que inventar un valor.
+
+    El archivo va ANTES que la variable de entorno por lo que pasó el
+    2026-08-27: el `--build-arg ORCMM_VERSION` que inyectaba deploy.sh dejó
+    de llegar al builder (flyctl construye con Depot), y como ARG tiene
+    valor por omisión nadie se enteró. La imagen se quedó sellada con un sha
+    de doce días antes, y siguió sellando corridas con él — exactamente el
+    caso "peor: un sha viejo que alguien puso a mano y nadie volvió a
+    tocar" que este comentario ya advertía. Un archivo dentro del contexto
+    no se puede perder en el camino: si cambia, la capa se reconstruye.
     """
     global _version
     if _version is not None:
@@ -60,6 +70,13 @@ def version_motor() -> str:
         ).stdout.strip()
     except Exception:
         sha = ""
+    if not sha:
+        try:
+            sello = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+            with open(sello, encoding="utf-8") as f:
+                sha = f.read().strip()
+        except OSError:
+            sha = ""
     _version = sha or os.getenv("ORCMM_VERSION") or "desconocida"
     return _version
 
