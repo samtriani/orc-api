@@ -72,6 +72,10 @@ HOJAS = {
                                           "reporte; ninguna regla lo usa.", "LA COMER COYOACAN"),
             ("proveedor_id", TXT, False, "Clave del proveedor principal del SKU.", "PRV-0442"),
             ("proveedor_nombre", TXT, False, "Nombre del proveedor principal del SKU.", "Kimberly Clark"),
+            # Segmentación por decil de venta. Informativa para el motor —
+            # ninguna regla la consume— pero sí filtra el reporte, igual que
+            # la vía: permite ver el Pareto sólo de los SKU de mayor rotación.
+            ("decil", TXT, False, "Decil de venta del SKU. Ej.: Decil 1 (el de mayor venta).", "Decil 1"),
         ],
     },
 

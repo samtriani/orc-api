@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS catalogo (
     -- citas, pero permite conocerlo sin depender de una orden abierta.
     proveedor_id      TEXT,
     proveedor_nombre  TEXT,
+    -- Decil de venta del SKU. Informativa: ninguna regla la consume, pero
+    -- filtra el reporte igual que la vía de resurtido.
+    decil             TEXT,
     cargado_en        TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (sku, tienda)
 );

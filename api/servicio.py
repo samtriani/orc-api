@@ -15,6 +15,7 @@ exactamente los mismos números que el Excel de resultados.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from collections import defaultdict
@@ -30,7 +31,7 @@ from orcmm_pipeline import (Fuentes, PaqueteFuentes, aviso_prioridad_3,  # noqa:
                             citas_incumplidas, derivar_evidencias,
                             desempeno_proveedores, discrepancias_pedido_cita,
                             escribir_resultado, fill_rate_proveedor, leer_fuentes,
-                            nivel_servicio_tienda, osa_alcance, osa_general,
+                            _texto, nivel_servicio_tienda, osa_alcance, osa_general,
                             resumen_excluidos_sima,
                             universo_osa, waterfall_osa,
                             VIAS, clave_catalogo, es_dsd)
@@ -201,6 +202,27 @@ def _proveedores_a_dict(fu: Fuentes, umbral_osa: float = 100.0) -> List[dict]:
     } for d in desempeno_proveedores(fu, umbral_osa)]
 
 
+def _decil(valor) -> Optional[str]:
+    """Normaliza el decil a "Decil N", venga como venga.
+
+    El valor viaja al front tal cual y ahí se agrupa por texto exacto, así que
+    "Decil 1" y "decil 1" en el mismo catálogo darían DOS opciones en el
+    desplegable, cada una filtrando la mitad de los SKU. No truena: parte los
+    datos en silencio, que es peor.
+
+    Mismo criterio que _clave_proveedor y clave_catalogo, que existen por el
+    mismo motivo. Un valor que no tenga la forma esperada se respeta tal cual
+    —limpio de espacios— en vez de descartarlo: si mañana mandan "Top" o "A",
+    el filtro lo sigue ofreciendo.
+    """
+    t = _texto(valor)
+    if not t:
+        return None
+    t = " ".join(t.split())
+    m = re.fullmatch(r"decil\s*(\d+)", t, re.IGNORECASE)
+    return f"Decil {int(m.group(1))}" if m else t
+
+
 class IndiceJerarquia:
     """Sección/categoría/subcategoría/marca y VÍA de cada SKU, comprimido.
 
@@ -244,9 +266,14 @@ class IndiceJerarquia:
 
     def de(self, sku: str, tienda: str) -> int:
         c = self._fu.comercial.get((sku, tienda)) or {}
+        # El decil sale de CATALOGO, no del catálogo comercial: es el único
+        # de los seis que vive en la hoja del layout. Va al final del combo
+        # para no recorrer los índices que el front ya usa.
+        cat = self._fu.catalogo.get((sku, tienda)) or {}
         clave = (c.get("grupo_seccion"), c.get("categoria"),
                  c.get("subcategoria"), c.get("marca"),
-                 self._via(sku, tienda))
+                 self._via(sku, tienda),
+                 _decil(cat.get("decil")))
         if clave not in self._indice:
             self._indice[clave] = len(self.combos)
             self.combos.append(list(clave))
@@ -447,7 +474,7 @@ def analizar(ruta: Optional[Path], salida: Path, umbral_osa: float = 100.0,
         "por_sku_tienda": por_sku,
         "detalle_dias": _detalle_dias(fu, en_alcance, jer),
         # El catálogo que resuelve la `j` de cada renglón: una lista de
-        # [sección, categoría, subcategoría, marca, vía]. Va después de las
+        # [sección, categoría, subcategoría, marca, vía, decil]. Va después de las
         # dos listas que lo indexan porque se llena mientras se arman.
         "jerarquia": jer.combos,
         "proveedores": _proveedores_a_dict(fu, umbral_osa),
