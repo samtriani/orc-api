@@ -48,6 +48,11 @@ class CausaRaiz(str, Enum):
     # el proveedor aún está en plazo, así que el faltante no es suyo — el
     # pedido se colocó tarde para cubrir el consumo de ese día.
     RC07 = "Pedido a proveedor tardío"
+    # La bolsa que agrupa a las tres de arriba cuando FUSIONAR_PEDIDOS está
+    # puesto. Código nuevo a propósito: reusar RC03 dejaría el mismo número
+    # significando dos cosas distintas entre un reporte entregado y el
+    # siguiente, que es justo lo que hay que evitar.
+    RC08 = "Pedidos"
     RC99 = "Sin clasificar"
 
 
@@ -75,6 +80,8 @@ class SubcausaProveedor(str, Enum):
     La primera se negocia con el área de citas; la segunda es un problema de
     capacidad o de asignación del proveedor; la tercera es incumplimiento puro.
     """
+    SIN_PEDIDO = "No existe pedido a proveedor vigente ese día"
+    SIN_PEDIDO_DSD = "No existe pedido DSD al proveedor que cubra ese día"
     SIN_CITA = "El pedido no llegó a tener cita en CEDIS"
     CROSSDOCK_PEDIDO_TARDE = ("Entrega completa en crossdock; el pedido se "
                               "generó tarde para cubrir el consumo")
@@ -175,6 +182,11 @@ class SubcausaPedidoTienda(str, Enum):
     """
     AUTOMATICO_NO_GENERO = "Resurtido automático: el sistema no generó el pedido"
     MANUAL_NO_GENERO = "Resurtido manual: no se generó el pedido a mano"
+    # Sin tipo_resurtido en catálogo no se puede decir quién debía generarlo,
+    # pero el hecho sigue siendo cierto y hay que poder leerlo: al fusionar
+    # las causas de pedido en una sola, la subcausa es lo único que queda
+    # diciendo QUÉ pasó.
+    NO_GENERO_SIN_TIPO = "No se generó el pedido de tienda (catálogo sin tipo de resurtido)"
 
 
 # ===========================================================================
@@ -293,6 +305,39 @@ SIN_CITA_VA_A = "compras"
 #
 # En False todo vuelve a RC05 y el reporte se lee como antes del 2026-08-22.
 SEPARAR_PEDIDO_TARDIO = True
+
+# ---------------------------------------------------------------------------
+# FUSIONAR LAS CAUSAS DE PEDIDO EN UNA SOLA   (La Comer, 2026-08-25)
+#
+# RC03, RC05 y RC07 se presentan como una única causa "Pedidos". Las tres
+# hablan de lo mismo —alguien no colocó un pedido, o lo colocó tarde— y
+# repartidas en tres barras ninguna se veía grande, así que la familia se leía
+# más chica de lo que es. Juntas suben al segundo lugar del Pareto.
+#
+# LA FUSIÓN ES DE PRESENTACIÓN, NO DE CLASIFICACIÓN. El árbol sigue
+# dictaminando RC03, RC05 y RC07 con su prioridad y su evidencia; el cambio
+# ocurre en un solo lugar, al serializar el dictamen. Eso significa que:
+#
+#   - Apagar el interruptor devuelve las tres, sin volver a correr nada del
+#     motor ni tocar otra línea.
+#   - La SUBCAUSA sigue diciendo cuál de las tres era, así que la información
+#     no se pierde: se lee un nivel más abajo. Por eso, antes de fusionar, se
+#     le dio subcausa a las tres salidas que no la tenían — sin eso, esos días
+#     quedaban dentro de la bolsa sin nada que los explicara.
+#   - El OSA, el universo y la venta perdida NO se mueven: son los mismos días
+#     con otra etiqueta, y los puntos de cada una se suman dentro de la bolsa.
+#
+# En False el reporte vuelve a leerse como antes del 2026-08-25.
+FUSIONAR_PEDIDOS = True
+
+CAUSAS_DE_PEDIDO = frozenset({"RC03", "RC05", "RC07"})
+
+
+def _fusion(root_cause_id: str, causa: str):
+    """La causa tal como se presenta: fusionada o como la dictaminó el árbol."""
+    if FUSIONAR_PEDIDOS and root_cause_id in CAUSAS_DE_PEDIDO:
+        return "RC08", CausaRaiz.RC08.value
+    return root_cause_id, causa
 
 
 def _tardio():
@@ -621,7 +666,8 @@ class R3_PedidoTiendaNoGenerado(Regla):
         if not ev.pedido_tienda_generado:
             responsable = RESPONSABLE_PEDIDO_NO_GENERADO.get(
                 ev.tipo_resurtido, Responsable.TIENDA_ABASTO)
-            subcausa = SUBCAUSA_PEDIDO_NO_GENERADO.get(ev.tipo_resurtido)
+            subcausa = SUBCAUSA_PEDIDO_NO_GENERADO.get(
+                ev.tipo_resurtido, SubcausaPedidoTienda.NO_GENERO_SIN_TIPO)
 
             detalle = "No existe pedido de tienda"
             fuente = "SIMA"
@@ -727,6 +773,7 @@ class R7_R8_RamaProveedorCedis(Regla):
                 7, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
                 "NS / Pedidos proveedor",
                 ctx + ["No existe pedido a proveedor"],
+                subcausa=SubcausaProveedor.SIN_PEDIDO,
             )
 
         etiqueta = f"Pedido a proveedor {ev.proveedor_folio_pedido} vigente" \
@@ -906,6 +953,7 @@ class R9_R10_RamaDSD(Regla):
                 self.prioridad, "RC05", CausaRaiz.RC05, Responsable.COMPRAS_ABASTO,
                 "Pedido DSD",
                 ctx + ["No existe pedido DSD al proveedor que cubra este día"],
+                subcausa=SubcausaProveedor.SIN_PEDIDO_DSD,
             )
 
         if ev.dsd_entrego_tienda is None:
@@ -977,8 +1025,17 @@ class MotorRCA:
             "osa": ev.osa,
             "venta_perdida": ev.venta_perdida,
             "clasificado": True,
-            "root_cause_id": d.root_cause_id,
-            "causa_raiz": d.causa.value,
+            # Único punto donde la fusión se aplica: de aquí para abajo —Excel,
+            # resumen, run_dias, pantalla— todos ven la misma causa. Ver
+            # FUSIONAR_PEDIDOS.
+            "root_cause_id": _fusion(d.root_cause_id, d.causa.value)[0],
+            "causa_raiz": _fusion(d.root_cause_id, d.causa.value)[1],
+            # El código que dictaminó el árbol, antes de fusionar. Sin fusión
+            # es idéntico al de arriba. Existe para que se pueda auditar qué
+            # regla disparó realmente, y para que la prueba de humo fije las
+            # reglas y no la presentación —si no, prender el interruptor
+            # "rompería" pruebas que en realidad siguen pasando.
+            "causa_base": d.root_cause_id,
             "responsable": d.responsable.value,
             "subcausa": d.subcausa.value if d.subcausa else None,
             "prioridad_regla": d.prioridad,

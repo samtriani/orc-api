@@ -38,7 +38,8 @@ from orcmm_fuentes_csv import (ReporteCSV, agrupar_por_hoja, leer_csv,
                                llaves_con_faltante_ws)
 from orcmm_layout_spec import (FILA_DATOS, FILA_ENCABEZADO, HOJAS,
                                ORIGEN_CENTRALIZADO, normalizar_encabezado)
-from orcmm_rca_engine import (CausaRaiz, EVALUAR_PEDIDO_TIENDA, EXCLUIR_SKU_SIN_SIMA,
+from orcmm_rca_engine import (CausaRaiz, CAUSAS_DE_PEDIDO, EVALUAR_PEDIDO_TIENDA,
+                              EXCLUIR_SKU_SIN_SIMA, FUSIONAR_PEDIDOS,
                               FUERA_DE_CATALOGO, SIN_DATO_SIMA,
                               EvidenciaSKUTienda, TipoResurtido, ViaResurtido)
 from orcmm_rca_periodo import (clasificar, cobertura_modelo, dentro_del_alcance,
@@ -52,9 +53,13 @@ AMARILLO, GRIS, AZUL, AMBAR, VERDE, ROJO = "FFE600", "F2F2F2", "DDEBF7", "FFEB9C
 LILA = "E6E0F0"
 # RC07 va en ámbar y no en rojo a propósito: "lo pidieron tarde" es más suave
 # que "no lo pidieron", y el color lo dice sin tener que leer la etiqueta.
+# RC08 "Pedidos" es la fusión de RC03, RC05 y RC07 (ver FUSIONAR_PEDIDOS en
+# el motor). Va en rojo porque dos de las tres lo estaban y el mensaje de la
+# bolsa es el fuerte: no se pidió. Los tres códigos originales se quedan en el
+# mapa para que apagar el interruptor no deje ninguna causa sin color.
 COLOR_CAUSA = {"RC00": LILA, "RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
                "RC04": AMBAR, "RC05": ROJO, "RC06": ROJO, "RC07": AMBAR,
-               "RC99": GRIS}
+               "RC08": ROJO, "RC99": GRIS}
 
 NEGRITA = Font(bold=True)
 TITULO = Font(bold=True, size=14)
@@ -287,6 +292,8 @@ def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
         ids[causa] = dg["root_cause_id"]
         resp[causa] = dg["responsable"]
 
+    apagadas = (CAUSAS_DE_PEDIDO if FUSIONAR_PEDIDOS else {"RC08"})
+
     # La taxonomía COMPLETA, aunque una causa no haya ocurrido. Antes sólo se
     # dibujaban las causas con días, así que la gráfica cambiaba de renglones
     # entre tiendas y entre periodos y no se podía comparar de un vistazo: que
@@ -296,8 +303,13 @@ def waterfall_osa(fu: "Fuentes", diagnosticos: List[dict]) -> dict:
     # RC99 va sólo si tiene días: no es una causa, es la ausencia de una, y un
     # renglón fijo de "Sin clasificar: 0.00 pp" se leería como si el modelo
     # tuviera una deuda permanente.
+    #
+    # Las causas que la fusión apagó tampoco: con FUSIONAR_PEDIDOS puesto,
+    # RC03/RC05/RC07 ya no existen y un renglón suyo en cero diría que esa
+    # parte de la cadena no falló, cuando en realidad sus días están dentro de
+    # "Pedidos". Al revés, sin fusión el renglón que sobra es RC08.
     for c in CausaRaiz:
-        if c is CausaRaiz.RC99 or c.value in dias:
+        if c is CausaRaiz.RC99 or c.value in dias or c.name in apagadas:
             continue
         dias[c.value] = 0
         ids[c.value] = c.name

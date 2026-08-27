@@ -12,7 +12,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orcmm_rca_engine import EvidenciaSKUTienda, MotorRCA, TipoResurtido, ViaResurtido
+from orcmm_rca_engine import (CAUSAS_DE_PEDIDO, FUSIONAR_PEDIDOS, EvidenciaSKUTienda,
+                              MotorRCA, TipoResurtido, ViaResurtido)
 
 MOTOR = MotorRCA()
 FALLOS = []
@@ -25,7 +26,11 @@ def caso(nombre, esperado_rc, esperado_resp=None, **campos):
                             osa=0.0, venta_perdida=100.0, **campos)
     CASOS[0] += 1
     d = MOTOR.diagnosticar(ev)
-    rc = d.get("root_cause_id")
+    # causa_base y no root_cause_id: estos casos fijan las REGLAS del árbol,
+    # no cómo se presentan. Ver FUSIONAR_PEDIDOS — con la fusión puesta,
+    # root_cause_id dice "RC08" para seis de estos casos, y compararlo aquí
+    # los reprobaría a todos sin que ninguna regla hubiera cambiado.
+    rc = d.get("causa_base", d.get("root_cause_id"))
     resp = d.get("responsable")
     mal = rc != esperado_rc or (esperado_resp and resp != esperado_resp)
     print(f"  {'MAL ' if mal else 'ok  '} {nombre:<52} {rc} · {resp}")
@@ -87,6 +92,54 @@ caso("El proveedor sí entregó -> ejecución en tienda", "RC01", "Tienda",
 caso("Nadie le pidió al proveedor -> RC05", "RC05", "Compras / Abasto",
      inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=True,
      via_resurtido=ViaResurtido.DSD, pedido_dsd_generado=False)
+
+
+print()
+print("La fusión de las causas de pedido")
+
+
+def caso_fusion(nombre, base, **campos):
+    """Verifica la capa de presentación, no la regla.
+
+    Lo que puede romperse aquí es que una causa de pedido escape de la bolsa
+    —se vería suelta en el Pareto— o que una que no lo es caiga dentro.
+    """
+    campos.setdefault("en_catalogo", True)
+    ev = EvidenciaSKUTienda(sku="X", tienda="287", fecha=date(2026, 3, 20),
+                            osa=0.0, venta_perdida=100.0, **campos)
+    CASOS[0] += 1
+    d = MOTOR.diagnosticar(ev)
+    esperado = "RC08" if (FUSIONAR_PEDIDOS and base in CAUSAS_DE_PEDIDO) else base
+    rc, sub = d.get("root_cause_id"), d.get("subcausa")
+    # Fusionar sin subcausa dejaría el día dentro de la bolsa sin nada que
+    # dijera qué pasó: la subcausa es lo único que sobrevive a la fusión.
+    mal = rc != esperado or (rc == "RC08" and not sub)
+    print(f"  {'MAL ' if mal else 'ok  '} {nombre:<52} {rc} · {sub or '(sin subcausa)'}")
+    if mal:
+        FALLOS.append(f"{nombre}: esperaba {esperado} con subcausa, dio {rc}/{sub}")
+
+
+caso_fusion("RC03 entra a Pedidos y conserva subcausa", "RC03",
+            inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=False,
+            tipo_resurtido=TipoResurtido.AUTOMATICO)
+# Sin tipo_resurtido no había subcausa: es el caso que obligó a inventarle una
+# antes de poder fusionar.
+caso_fusion("RC03 sin tipo de resurtido tampoco se queda mudo", "RC03",
+            inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=False)
+caso_fusion("RC05 entra a Pedidos y conserva subcausa", "RC05",
+            **comun, inventario_cedis=0, pedido_proveedor_generado=False)
+caso_fusion("RC07 entra a Pedidos y conserva subcausa", "RC07",
+            **comun, inventario_cedis=0, pedido_proveedor_generado=True,
+            proveedor_cajas_pedidas=10, proveedor_cita_agendada=True,
+            proveedor_cita_vencida=False)
+caso_fusion("RC05 de la rama DSD también entra", "RC05",
+            inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=True,
+            via_resurtido=ViaResurtido.DSD, pedido_dsd_generado=False)
+# Los controles: ninguna de estas es causa de pedido y no deben caer dentro.
+caso_fusion("RC01 se queda fuera de la bolsa", "RC01", inventario_tienda=12)
+caso_fusion("RC04 se queda fuera de la bolsa", "RC04",
+            **comun, inventario_cedis=50, envio_cedis_generado=False)
+
 
 if FALLOS:
     print("\nFALLÓ:")
