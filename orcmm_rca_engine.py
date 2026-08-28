@@ -242,7 +242,35 @@ REFINAR_RC01_CON_ALERTA = True
 
 # ¿Un pedido sin cita es incumplimiento del proveedor?
 #
-# NO (decidido con La Comer, 2026-08-22). Estaba en Sí, y fabricaba culpables:
+# SÍ (La Comer, 2026-08-28). Estuvo seis días en "compras" por lo que dice el
+# bloque de abajo, que se conserva porque el motivo era bueno y hay que poder
+# volver sobre él. Lo que lo tumbó fue medir la premisa en vez de suponerla:
+#
+#   El argumento era que "sin cita" es un hueco de extracción, porque CITAS
+#   cubre feb-mar mientras COMPRAS va de mayo'25 a jun'26. Cierto en general,
+#   pero NO explica marzo: de los pedidos colocados EN marzo —dentro de la
+#   ventana que las citas sí cubren— 6,862 de 9,444 (73%) siguen sin cita. El
+#   desfase de ventanas no era la explicación.
+#
+#   Y el síntoma que lo cierra: en Sumesa Centenario hay 11 SKU que pasan los
+#   30 días del mes seguidos en "pedido aún en plazo". Un plazo que no vence
+#   en un mes entero no es un plazo.
+#
+# Medido en Sumesa Centenario marzo, el interruptor vale:
+#
+#     compras     RC06    215 días / $2,421    Pedidos 7,084 días / $110,193
+#     proveedor   RC06  5,150 días / $82,855   Pedidos 2,149 días / $29,758
+#
+# De paso la propagación de RC06 pasa de 42 a 209 días ahí: hasta ahora casi
+# no tenía incumplimientos de dónde colgar. Ver PROPAGAR_RC06.
+#
+# SIGUE ABIERTA una pregunta a La Comer: si CITAS_PROV_CEDIS de marzo viene
+# completa o sólo trae algunos CEDIS/proveedores. Si estuviera incompleta, el
+# valor correcto vuelve a ser "compras" y basta cambiar esta palabra.
+#
+# ------------------------------------------------------------------ historia
+# Lo que sostenía el "NO" del 2026-08-22, cuando estaba en Sí y se juzgó que
+# fabricaba culpables:
 #
 #   1. MEDIDO: 811,095 de 848,027 pedidos a CEDIS —el 95.6%— no tienen cita.
 #      Ningún proveedor opera así. Lo que pasa es que CITAS_PROV_CEDIS cubre
@@ -278,7 +306,7 @@ REFINAR_RC01_CON_ALERTA = True
 #
 # Medido en Coyoacán marzo: son 4,178 días y $100,821. Con "proveedor" RC06
 # vale 4,570 días; con las otras dos, 392. No es un matiz.
-SIN_CITA_VA_A = "compras"
+SIN_CITA_VA_A = "proveedor"
 
 # ---------------------------------------------------------------------------
 # SEPARAR "TARDÍO" DE "NO GENERADO"   (La Comer, 2026-08-22)

@@ -78,7 +78,11 @@ caso("Con pedido y cita aun por vencer -> RC07 tardio", "RC07", "Compras / Abast
      **comun, inventario_cedis=0, pedido_proveedor_generado=True,
      proveedor_cajas_pedidas=10, proveedor_cita_agendada=True,
      proveedor_cita_vencida=False)
-caso("Con pedido y sin cita -> RC07 tardio", "RC07", "Compras / Abasto",
+# Este caso fija SIN_CITA_VA_A, que es un acuerdo de negocio y no una regla:
+# estuvo en "compras" del 22 al 28 de agosto y volvio a "proveedor" cuando se
+# midio que el 73% de los pedidos de marzo siguen sin cita DENTRO de la
+# ventana que las citas cubren. Si alguien lo mueve, este caso lo dice.
+caso("Con pedido y sin cita -> incumplimiento del proveedor", "RC06", "Proveedor",
      **comun, inventario_cedis=0, pedido_proveedor_generado=True,
      proveedor_cajas_pedidas=10, proveedor_cita_agendada=False)
 
