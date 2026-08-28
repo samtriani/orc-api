@@ -977,6 +977,201 @@ class R9_R10_RamaDSD(Regla):
 
 
 # ---------------------------------------------------------------------------
+# PROPAGACION TEMPORAL DE RC06   (La Comer, 2026-08-28)
+#
+# El motor clasifica UN dia a la vez y eso esta bien para casi todo: la
+# evidencia de inventario, transito y pedido cambia diariamente. Pero tiene un
+# punto ciego. Cuando un proveedor no entrega, el anaquel no se vacia solo ese
+# dia: sigue vacio manana y pasado, y esos dias el arbol los vuelve a evaluar
+# desde cero como si fueran eventos nuevos. Al no haber ya nada que pedirle a
+# CEDIS, caen en la bolsa de "Pedidos" --le reclaman a Compras un pedido que de
+# todas formas nadie habria podido surtir--.
+#
+# La regla dice: el incumplimiento sigue siendo la causa hasta que exista una
+# NUEVA OPORTUNIDAD FORMAL de abastecimiento para volver a juzgar al proveedor.
+#
+# QUE CUENTA COMO NUEVA OPORTUNIDAD. No `pedido_proveedor_generado`: ese
+# booleano se queda en True mientras el mismo pedido siga vigente, asi que
+# marcaria una oportunidad nueva cada dia. La frontera es el FOLIO
+# (`proveedor_folio_pedido`): cambia justo cuando otra orden pasa a ser la que
+# debia tapar el hueco. Que el folio desaparezca --la orden se cerro y ninguna
+# la relevo-- NO es una oportunidad nueva: es la ausencia de una.
+#
+# QUE CIERRA LA CADENA. Tres cosas, y las tres son evidencia positiva de que
+# el incumplimiento ya no es lo que aprieta:
+#
+#   1. Un hueco en las fechas. `derivar_evidencias` solo emite dias con
+#      faltante, asi que un dia con OSA recuperado no llega aqui como fila con
+#      OSA>0 -- llega como fecha ausente. Medido en marzo, 1.2% de los pares de
+#      dias consecutivos traen hueco. Un hueco tambien puede ser falta de
+#      observacion, no recuperacion; cortar en los dos casos se equivoca hacia
+#      no culpar al proveedor de mas, que es el lado correcto donde fallar.
+#   2. CAUSAS_QUE_CIERRAN_RC06 -- el dia trae producto. RC01 es que habia
+#      existencia en tienda o que el proveedor SI entrego (prioridad 10, rama
+#      DSD); RC02 que viene en transito; RC04 que CEDIS lo tenia y no lo mando.
+#      Son la condicion de cierre que la propia regla pide: "si cumple con la
+#      entrega, se cierra el periodo anterior". Medido en las 5 tiendas son 69
+#      dias, y los 66 de RC01 son todos prioridad 10 -- el proveedor entrego en
+#      tienda ese dia. Pisarlos con RC06 diria que fallo justo el dia que la
+#      fuente dice que cumplio.
+#   3. Un OSA por encima de cero, si alguna vez llega uno.
+#
+# CUANTO MUEVE. En las 5 tiendas de marzo (667,468 dias con faltante): 524
+# dias pasan a RC06 --516 de RC05 y 8 de RC03, o sea la bolsa "Pedidos", que es
+# exactamente lo que se esperaba-- por $7,232 de venta perdida. RC06 va de
+# 2,101 a 2,625 dias.
+#
+# La fase corre DESPUES de la matriz, nunca dentro de una regla: depende de
+# dias anteriores y las reglas R0-R10 son deterministas por dia. diagnosticar()
+# no cambia en nada.
+# ---------------------------------------------------------------------------
+
+PROPAGAR_RC06 = True
+
+# Ver punto 2 de arriba. No se pisan, y ademas cierran la cadena.
+CAUSAS_QUE_CIERRAN_RC06 = frozenset({"RC01", "RC02", "RC04"})
+
+
+def _marcar_propagado(dg: dict, fecha_origen, folio_origen,
+                      responsable, subcausa) -> None:
+    """Reescribe un dia como RC06 heredado, sin borrar lo que decia antes.
+
+    Nada se pisa en silencio: el dictamen original queda en las llaves
+    `*_original` para poder auditar que habria dicho la matriz sola.
+
+    Las llaves de trazabilidad se agregan SOLO a los dias propagados --son
+    cientos entre cientos de miles--. Ponerlas en todos costaria un par de
+    cientos de megas en una corrida de 5 tiendas, y este pipeline ya se murio
+    una vez por memoria en Fly. Quien lea el campo debe usar
+    `dg.get("tipo_clasificacion", "matriz")`: su ausencia significa que el dia
+    lo dictamino la matriz.
+    """
+    dg["causa_base_original"] = dg.get("causa_base")
+    dg["root_cause_id_original"] = dg["root_cause_id"]
+    dg["causa_raiz_original"] = dg["causa_raiz"]
+    dg["prioridad_regla_original"] = dg.get("prioridad_regla")
+
+    # Si venia como RC99 por falta de dato, ahora si tiene explicacion: la
+    # lista se vacia para que la cobertura no lo siga contando como hueco,
+    # pero se conserva cual era.
+    if dg.get("datos_faltantes"):
+        dg["datos_faltantes_original"] = list(dg["datos_faltantes"])
+        dg["datos_faltantes"] = []
+
+    dg["clasificado"] = True
+    # RC06 no pasa por _fusion: FUSIONAR_PEDIDOS solo agrupa RC03/RC05/RC07.
+    dg["root_cause_id"] = "RC06"
+    dg["causa_raiz"] = CausaRaiz.RC06.value
+    dg["causa_base"] = "RC06"
+    # Heredado del dia de origen y no fijo a Proveedor: con SIN_CITA_VA_A el
+    # RC06 de la prioridad 8 puede salir a nombre de otro responsable, y el
+    # dia heredado tiene que decir lo mismo que el dia del que cuelga.
+    dg["responsable"] = responsable or Responsable.PROVEEDOR.value
+    dg["subcausa"] = subcausa
+    dg["propagacion_rc06"] = True
+    dg["tipo_clasificacion"] = "propagada"
+    dg["fecha_origen_propagacion_rc06"] = (fecha_origen.isoformat()
+                                           if fecha_origen else None)
+    dg["folio_origen_propagacion_rc06"] = folio_origen
+
+    fuente = dg.get("fuente")
+    dg["fuente"] = (f"{fuente} + Propagación temporal RC06" if fuente
+                    else "Propagación temporal RC06")
+
+    desde = fecha_origen.isoformat() if fecha_origen else "fecha no disponible"
+    pedido = f" (pedido {folio_origen})" if folio_origen else ""
+    dg["evidencia"] = list(dg.get("evidencia") or []) + [
+        f"El faltante viene del incumplimiento confirmado el {desde}"
+        f"{pedido}; no hubo una nueva vigencia de pedido que permitiera "
+        f"volver a evaluar al proveedor"]
+
+
+def propagar_rc06(evidencias: List[EvidenciaSKUTienda],
+                  diagnosticos: List[dict]) -> int:
+    """Segunda fase: hereda RC06 hacia adelante. Modifica `diagnosticos` en
+    sitio y devuelve cuantos dias se propagaron.
+
+    Las dos listas van pareadas por posicion y asi se devuelven: el orden de
+    `clasificar()` es contrato con `zip(evidencias, diagnosticos)` en el Excel
+    y en `guardar_dias`. Por eso se ordenan los INDICES para recorrer cada
+    tienda+SKU en orden cronologico, y no las listas.
+    """
+    if not PROPAGAR_RC06:
+        return 0
+
+    orden = sorted(range(len(evidencias)),
+                   key=lambda i: (evidencias[i].tienda, evidencias[i].sku,
+                                  evidencias[i].fecha))
+
+    propagados = 0
+    grupo = None
+    activo = False
+    folio_ancla = fecha_origen = folio_origen = None
+    responsable_origen = subcausa_origen = None
+    fecha_prev = None
+
+    for i in orden:
+        ev, dg = evidencias[i], diagnosticos[i]
+
+        # Nunca se cruza entre tiendas ni entre SKU.
+        if (ev.tienda, ev.sku) != grupo:
+            grupo = (ev.tienda, ev.sku)
+            activo = False
+            folio_ancla = fecha_origen = folio_origen = None
+            responsable_origen = subcausa_origen = None
+            fecha_prev = None
+
+        # causa_base solo existe en los dias clasificados; en los demas el
+        # codigo de la causa es el root_cause_id (RC00 / RC99).
+        base = dg.get("causa_base") or dg["root_cause_id"]
+
+        if fecha_prev is not None and (ev.fecha - fecha_prev).days != 1:
+            activo = False          # hueco: recupero o no se observo
+        fecha_prev = ev.fecha
+
+        # Un dia fuera del alcance no le toca a este analisis: ni hereda ni
+        # sostiene la cadena.
+        if base == RC00_FUERA_DE_ALCANCE:
+            activo = False
+            continue
+
+        folio = ev.proveedor_folio_pedido
+        nueva_vigencia = folio is not None and folio != folio_ancla
+
+        if nueva_vigencia:
+            # Nueva oportunidad de entrega: se corta lo anterior y manda el
+            # dictamen que la matriz dio hoy, sea cual sea.
+            activo = base == "RC06"
+        elif base == "RC06":
+            activo = True
+        elif activo:
+            if base in CAUSAS_QUE_CIERRAN_RC06:
+                activo = False
+            elif ev.osa is None:
+                # Vacio no es cero: sin OSA no se puede afirmar que el hueco
+                # siga abierto. Se respeta el dictamen del dia y se anota.
+                dg["propagacion_rc06_no_validada"] = "sin dato de OSA ese día"
+            elif ev.osa > 0:
+                activo = False      # recupero anaquel
+            else:
+                _marcar_propagado(dg, fecha_origen, folio_origen,
+                                  responsable_origen, subcausa_origen)
+                propagados += 1
+
+        # El ancla del episodio se fija en el dia que dictamino RC06, para que
+        # lo heredado cuelgue del pedido que realmente fallo y no del anterior.
+        if activo and base == "RC06":
+            fecha_origen, folio_origen = ev.fecha, folio
+            responsable_origen = dg["responsable"]
+            subcausa_origen = dg.get("subcausa")
+
+        if folio is not None:
+            folio_ancla = folio
+
+    return propagados
+
+
+# ---------------------------------------------------------------------------
 # 5. MOTOR
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1208,26 @@ class MotorRCA:
         return self._salida_sin_clasificar(
             ev, Indeterminado(99, ["ninguna_condicion_de_la_matriz_aplica"], ctx)
         )
+
+    def diagnosticar_periodo(self, evidencias: List[EvidenciaSKUTienda]) -> List[dict]:
+        """La matriz dia por dia MAS la propagacion temporal de RC06.
+
+        Es la entrada normal del motor: `clasificar()` pasa por aqui, asi que
+        el Excel, el expediente, la API y run_dias ven todos lo mismo.
+        `diagnosticar()` sigue existiendo tal cual para clasificar un dia
+        suelto sin historia.
+
+        Devuelve los dictamenes en el MISMO orden en que llegaron las
+        evidencias --no en orden cronologico--: hay dos lugares que las
+        vuelven a parear con `zip`, y reordenar aqui los descuadraria en
+        silencio.
+
+        Ojo con el nombre: `orcmm_rca_periodo.diagnosticar_periodo` es otra
+        cosa --agrega los veredictos diarios por SKU-tienda--. Esta clasifica.
+        """
+        diagnosticos = [self.diagnosticar(ev) for ev in evidencias]
+        propagar_rc06(evidencias, diagnosticos)
+        return diagnosticos
 
     # -- serialización -----------------------------------------------------
 

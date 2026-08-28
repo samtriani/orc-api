@@ -36,9 +36,16 @@ def clasificar(evidencias: List[EvidenciaSKUTienda]) -> List[dict]:
     """Corre la matriz sobre cada evidencia diaria. Una sola vez.
 
     Todo lo demás en este módulo consume el resultado de esta función.
+
+    Incluye la propagación temporal de RC06 (ver PROPAGAR_RC06 en el motor),
+    que necesita ver la serie completa de cada SKU-tienda y por eso no cabe
+    dentro de una regla. Va aquí y no en cada llamador para que el Excel, el
+    expediente, la API y run_dias no puedan salir diciendo cosas distintas.
+
+    El orden de salida es el mismo de `evidencias`: hay dos lugares que las
+    vuelven a parear con `zip`.
     """
-    motor = MotorRCA()
-    return [motor.diagnosticar(ev) for ev in evidencias]
+    return MotorRCA().diagnosticar_periodo(evidencias)
 
 
 # ---------------------------------------------------------------------------
