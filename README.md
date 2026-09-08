@@ -33,7 +33,7 @@ proyecto.
 | `orcmm_validar_layout.py` | Revisa el paquete contra el spec **antes** de correrlo, y cruza las fuentes entre sí. No corrige nada. |
 | `orcmm_corregir_layout.py` | Arregla lo que se puede arreglar solo. Nunca toca el original. |
 | `orcmm_db.py` | Conexión a Postgres y upsert genérico — lo usan los tres scripts de abajo. |
-| `orcmm_db_init.py` | Aplica `sql/schema.sql` (crea las tablas). |
+| `orcmm_db_init.py` | Aplica `sql/orcmm_ddl_completo.sql` (crea las tablas). |
 | `orcmm_db_borrar.py` | Vacía las tablas de datos operativos, sin tocar el esquema ni los catálogos informativos. |
 | `orcmm_etl_carga.py` | Carga el layout principal (xlsx + CSV) a Postgres. |
 | `orcmm_etl_catalogos.py` | Carga sucursales y el catálogo de SKU por tienda (aparte del layout de captura). |
@@ -233,9 +233,14 @@ fly secrets set DATABASE_URL="postgresql://usuario:password@host/db?sslmode=requ
 python orcmm_db_init.py
 ```
 
-Corre `sql/schema.sql` (12 tablas: las 9 del layout, `sucursales`,
-`catalogo_sku_tienda` y `etl_cargas` de bitácora). Usa `IF NOT EXISTS` en
+Corre `sql/orcmm_ddl_completo.sql` (14 tablas: las 9 del layout,
+`sucursales` y `catalogo_sku_tienda` de referencia, `runs` y `run_dias`
+con los resultados, y `etl_cargas` de bitácora). Usa `IF NOT EXISTS` en
 todo, así que es seguro volver a correrlo.
+
+Ese archivo es el DDL completo y es el que se le entrega al cliente para
+instalar desde cero. `sql/historico/` guarda el esquema original y las
+migraciones que se le fueron aplicando: son historia, no se ejecutan.
 
 ### Cargar datos
 

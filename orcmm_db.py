@@ -34,7 +34,8 @@ TABLAS = {
     "SIMA_PEDIDOS_TIENDA":  {"tabla": "sima_pedidos_tienda",  "llave": ["folio", "sku"]},
     "COMPRAS_PEDIDOS_PROV": {"tabla": "compras_pedidos_prov", "llave": ["folio", "sku"]},
     # folio_cita solo no es único: una cita cubre varios SKU (verificado
-    # contra datos reales — ver nota en sql/schema.sql).
+    # contra datos reales — ver nota en
+    # sql/orcmm_ddl_completo.sql).
     "CITAS_PROV_CEDIS":     {"tabla": "citas_prov_cedis",     "llave": ["folio_cita", "sku"]},
 }
 

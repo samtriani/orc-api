@@ -18,8 +18,8 @@ las entradas viejas — así queda el historial de decisiones.
 - **Postgres (Neon)** — capa raw persistente de las 9 hojas del layout +
   2 catálogos informativos. `DATABASE_URL` vive en `orc-api/.env` (git-
   ignorado, nunca se sube) y, en Fly.io, como `fly secrets set
-  DATABASE_URL=...`. Esquema en `sql/schema.sql`, se aplica con `python
-  orcmm_db_init.py`. El motor de clasificación **ya puede leer de aquí**:
+  DATABASE_URL=...`. Esquema en `sql/orcmm_ddl_completo.sql` (el DDL completo, 14
+  tablas), se aplica con `python orcmm_db_init.py`. El motor de clasificación **ya puede leer de aquí**:
   `POST /api/analizar-tienda` (tienda + periodo, sin subir archivo) además
   del `POST /api/analizar` de siempre (sube archivo). Ver sesión 2026-08-10.
 - **`orc-gui`** ([github.com/samtriani/orc-gui](https://github.com/samtriani/orc-gui)) —
