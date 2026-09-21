@@ -53,6 +53,14 @@ class CausaRaiz(str, Enum):
     # significando dos cosas distintas entre un reporte entregado y el
     # siguiente, que es justo lo que hay que evitar.
     RC08 = "Pedidos"
+    # El registro dice que hay producto en tienda, pero no alcanza ni
+    # para llenar el anaquel una vez. Sale de RC01: hasta ahora los dos
+    # casos se contaban juntos como "Ejecución en Tienda", y no son la
+    # misma conversación. Con una caja completa en trastienda y el
+    # anaquel vacío, el reclamo es a piso. Con tres piezas de una caja de
+    # doce, lo que falla es el registro de inventario. Ver
+    # PARTIR_INVENTARIO_FICTICIO.
+    RC09 = "Inventario Ficticio en Tienda"
     RC99 = "Sin clasificar"
 
 
@@ -230,6 +238,34 @@ NOTA_SIN_SIMA = ("Prioridad 3 omitida: sin datos de SIMA no se sabe si la tienda
 # ahora se mantiene RC01 / Tienda en los tres casos y sólo se distingue el
 # detalle, tal como se acordó.
 REFINAR_RC01_CON_ALERTA = True
+
+# ---------------------------------------------------------------------------
+# PARTIR "EJECUCIÓN EN TIENDA" CUANDO NO LLEGA NI A UNA CAJA
+#   (La Comer, 2026-09-21 — regla nueva del árbol)
+#
+# La prioridad 1 metía en la misma bolsa dos situaciones distintas. Si hay
+# una caja completa en trastienda y el anaquel está vacío, alguien no
+# surtió y el reclamo es a piso. Si lo que hay son tres piezas de una caja
+# de doce, lo más probable es que el registro mienta —merma, producto
+# extraviado, unidad mal capturada— y el reclamo es al control de
+# inventario. El responsable sigue siendo Tienda en los dos casos; lo que
+# cambia es a quién de la tienda y qué se le pide.
+#
+# CUÁNTO PARTE, medido sobre los 185,474 días que hoy caen en RC01 en las
+# 5 tiendas de marzo: 27,173 días y $429,747 pasan a RC09.
+#
+# OJO CON EL 63% DEL CATÁLOGO. De los 94,113 renglones de CATALOGO, 58,861
+# traen piezas_por_caja = 1. Para esos la regla NO PUEDE disparar nunca: si
+# el inventario es mayor que cero y la caja es de una pieza, jamás va a ser
+# "menor a una caja". Son 114,635 días y $2.03M que se quedan en RC01 sin
+# poder evaluarse. No es un error del modelo ni del dato —La Comer lo
+# confirmó así—, pero hay que saberlo antes de leer el Pareto: la regla
+# parte el 38% de los días que puede mirar y el 15% del total.
+#
+# El corte es ESTRICTO, como dice el diagrama: "menor a una caja". Con caja
+# de doce, once piezas es ficticio y doce no.
+# ---------------------------------------------------------------------------
+PARTIR_INVENTARIO_FICTICIO = True
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +511,11 @@ class EvidenciaSKUTienda:
     # --- Prioridad 1: ¿había producto en tienda?      Fuente: Inventario tienda / BOPS
     inventario_tienda: Optional[int] = None
 
+    # --- Prioridad 1, corte: unidad de empaque del SKU.   Fuente: CATALOGO
+    # Separa RC01 de RC09. None = sin dato: no se parte, el día se queda
+    # en RC01 (vacío no es cero). Ver PARTIR_INVENTARIO_FICTICIO.
+    piezas_por_caja: Optional[int] = None
+
     # --- Prioridad 1, refinamiento: banderas de alerta de BOPS (layout V8).
     # 1 / 0 / None. Sólo afinan la SUBCAUSA de RC01; no cambian causa ni
     # responsable. None = sin dato (vacío no es cero): RC01 no se refina.
@@ -627,13 +668,23 @@ class R0_DentroDelCatalogo(Regla):
 
 
 class R1_InventarioEnTienda(Regla):
-    """Prioridad 1 — Inventario tienda > 0 → Ejecución en tienda.
+    """Prioridad 1 — Hay inventario en tienda y el anaquel está vacío.
 
-    Desde el layout V8 se refina con las banderas de alerta de BOPS
+    Sale por dos puertas, no una. Si lo que hay no llega ni a una caja, el
+    registro de inventario no es creíble y el día es RC09 "Inventario
+    Ficticio"; si hay una caja o más, es RC01 "Ejecución en Tienda" y el
+    hueco es de piso. Ver PARTIR_INVENTARIO_FICTICIO.
+
+    RC01 se refina además con las banderas de alerta de BOPS
     (alerta_enviada / alerta_ejecutada). El refinamiento NO cambia la causa ni
     el responsable —sigue siendo RC01 / Tienda—: sólo distingue la SUBCAUSA,
     para saber si la tienda ignoró la alerta, la atendió sin efecto, o nunca
     fue notificada. Ver subcausa_por_alerta y REFINAR_RC01_CON_ALERTA.
+
+    RC09 NO se refina con la alerta a propósito: esa subcausa contesta "¿la
+    tienda reaccionó al aviso?", y cuando el inventario es fantasma la
+    pregunta pierde sentido —no había qué surtir—. Lo que explica ese día son
+    las piezas contra el tamaño de la caja, y eso va en la evidencia.
     """
     prioridad = 1
 
@@ -642,6 +693,9 @@ class R1_InventarioEnTienda(Regla):
             return Indeterminado(self.prioridad, ["inventario_tienda"])
 
         if ev.inventario_tienda > 0:
+            ficticio = self._menos_de_una_caja(ev)
+            if ficticio is not None:
+                return ficticio
             evidencia = [f"Inventario en tienda = {ev.inventario_tienda} (> 0)"]
             subcausa = subcausa_por_alerta(ev, evidencia)
             return Dictamen(
@@ -653,6 +707,32 @@ class R1_InventarioEnTienda(Regla):
 
         ctx.append("Inventario en tienda = 0")
         return None
+
+    def _menos_de_una_caja(self, ev) -> Evaluacion:
+        """RC09 si lo que hay no alcanza para una caja. None = no aplica.
+
+        Sin `piezas_por_caja` no se parte: vacío no es cero, y sin saber de
+        cuánto es la caja no se puede decir que el inventario sea insuficiente.
+
+        Con `piezas_por_caja = 1` esto nunca devuelve nada, porque el
+        inventario ya se comprobó mayor que cero y ningún entero positivo es
+        menor que 1. Es el 63% del catálogo y no hace falta un caso especial
+        para ello: la aritmética ya lo resuelve.
+        """
+        if not PARTIR_INVENTARIO_FICTICIO:
+            return None
+        if ev.piezas_por_caja is None or ev.piezas_por_caja <= 0:
+            return None
+        if ev.inventario_tienda >= ev.piezas_por_caja:
+            return None
+
+        return Dictamen(
+            self.prioridad, "RC09", CausaRaiz.RC09, Responsable.TIENDA,
+            "Inventario tienda / CATALOGO",
+            [f"Inventario en tienda = {ev.inventario_tienda} pieza(s), "
+             f"menos de una caja de {ev.piezas_por_caja}: el registro no "
+             f"alcanza ni para reponer el anaquel una vez"],
+        )
 
 
 class R2_TransitoVigente(Regla):
@@ -1057,7 +1137,12 @@ class R9_R10_RamaDSD(Regla):
 PROPAGAR_RC06 = True
 
 # Ver punto 2 de arriba. No se pisan, y ademas cierran la cadena.
-CAUSAS_QUE_CIERRAN_RC06 = frozenset({"RC01", "RC02", "RC04"})
+#
+# RC09 va aqui por el mismo motivo que RC01: es inventario EN la tienda. Que
+# el registro no llegue a una caja no lo vuelve inexistente, y culpar al
+# proveedor de un dia con producto en el piso seria justo el error que esta
+# lista evita.
+CAUSAS_QUE_CIERRAN_RC06 = frozenset({"RC01", "RC02", "RC04", "RC09"})
 
 
 def _marcar_propagado(dg: dict, fecha_origen, folio_origen,

@@ -50,6 +50,24 @@ caso("Inventario 0 y tránsito vigente -> transporte", "RC02", "Logística",
 caso("Sin dato de inventario -> se detiene", "RC99",
      inventario_tienda=None)
 
+print("\nPrioridad 1 — el corte entre ejecución e inventario ficticio")
+# Ver PARTIR_INVENTARIO_FICTICIO. El corte es ESTRICTO: "menor a una caja",
+# que es como lo dice el diagrama que mandó La Comer.
+caso("Menos de una caja -> inventario ficticio", "RC09", "Tienda",
+     inventario_tienda=4, piezas_por_caja=12)
+caso("Una caja exacta -> sigue siendo ejecución", "RC01", "Tienda",
+     inventario_tienda=12, piezas_por_caja=12)
+caso("Más de una caja -> ejecución", "RC01", "Tienda",
+     inventario_tienda=30, piezas_por_caja=12)
+# El 63% del catálogo trae piezas_por_caja = 1. Ahí la regla no puede disparar
+# nunca, y no hace falta un caso especial: la aritmética lo resuelve sola.
+caso("Caja de una pieza -> la regla no aplica", "RC01", "Tienda",
+     inventario_tienda=5, piezas_por_caja=1)
+# Vacío no es cero: sin saber de cuánto es la caja no se puede afirmar que el
+# inventario sea insuficiente.
+caso("Sin unidad de empaque -> no se parte", "RC01", "Tienda",
+     inventario_tienda=4, piezas_por_caja=None)
+
 print("\nPrioridad 3 — el pedido de tienda")
 # El responsable depende de tipo_resurtido: automático es de Compras. Es el
 # empate que fallaba por la tilde de "Automático" (ver clave_catalogo).
@@ -243,6 +261,13 @@ if PROPAGAR_RC06:
     caso_prop("Producto en tienda cierra el periodo",
               [dia(10, "A"), dia(11, None, inv=5), dia(12, None)],
               "RC06 RC01 RC08")
+    # RC09 tambien cierra: que el registro no llegue a una caja no vuelve
+    # inexistente el producto, y culpar al proveedor de un dia con mercancia
+    # en el piso es justo el error que CAUSAS_QUE_CIERRAN_RC06 evita.
+    caso_prop("Inventario ficticio tambien cierra el periodo",
+              [dia(10, "A"), dia(11, None, inv=4, piezas_por_caja=12),
+               dia(12, None)],
+              "RC06 RC09 RC08")
     # Que el folio desaparezca no es una oportunidad nueva: es la ausencia
     # de una. Es la mitad del valor de la regla.
     caso_prop("Quedarse sin folio no es una nueva oportunidad",

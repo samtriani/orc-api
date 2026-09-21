@@ -57,9 +57,13 @@ LILA = "E6E0F0"
 # el motor). Va en rojo porque dos de las tres lo estaban y el mensaje de la
 # bolsa es el fuerte: no se pidió. Los tres códigos originales se quedan en el
 # mapa para que apagar el interruptor no deje ninguna causa sin color.
+# RC09 "Inventario Ficticio" es hermano de RC01 —los dos son inventario en
+# tienda— pero no puede ir del mismo azul: el Pareto los va a mostrar
+# pegados y el color es lo único que los separa de un vistazo.
+ARENA = "EADFD0"
 COLOR_CAUSA = {"RC00": LILA, "RC01": AZUL, "RC02": AMBAR, "RC03": ROJO,
                "RC04": AMBAR, "RC05": ROJO, "RC06": ROJO, "RC07": AMBAR,
-               "RC08": ROJO, "RC99": GRIS}
+               "RC08": ROJO, "RC09": ARENA, "RC99": GRIS}
 
 NEGRITA = Font(bold=True)
 TITULO = Font(bold=True, size=14)
@@ -1252,6 +1256,10 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             sku_en_sima=(None if not fu.sin_dato_sima
                          else (sku, tienda) not in fu.sin_dato_sima),
             inventario_tienda=existencia,
+            # Corte entre RC01 y RC09: con cuántas piezas viene una caja de
+            # este SKU. Sin catálogo queda en None y la prioridad 1 no parte.
+            # Ver PARTIR_INVENTARIO_FICTICIO en el motor.
+            piezas_por_caja=_entero(cat.get("piezas_por_caja")) if cat else None,
             # Banderas de alerta de BOPS (V8). Refinan la subcausa de RC01;
             # None = sin dato (vacío no es cero).
             alerta_enviada=_bool_alerta(fila_osa.get("alerta_enviada")),
