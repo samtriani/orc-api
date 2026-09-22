@@ -478,6 +478,12 @@ class Fuentes:
     transferencias_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_tienda_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
     pedidos_prov_por: Dict[Tuple[str, str], List[Tuple]] = field(default_factory=dict)
+    # olas_por[(cedis, tienda)] -> {fechas de salida de mercancía}
+    # Una "ola" es una salida del CEDIS hacia la tienda, de cualquier SKU: es
+    # la oportunidad que tuvo el CEDIS de mandar este producto. Se guarda como
+    # conjunto para que reindexar dos veces no duplique. Ver
+    # derivar_ultima_ola y USAR_ULTIMA_OLA_CEDIS.
+    olas_por: Dict[Tuple[str, str], set] = field(default_factory=dict)
     # Pedidos DSD por (sku, tienda): los que COMPRAS manda con tienda_destino,
     # donde el proveedor entrega directo en la sucursal y no hay CEDIS. Van
     # aparte de pedidos_prov_por porque ése se llavea por CEDIS y un DSD no
@@ -692,11 +698,17 @@ def _indexar_eventos(fu: Fuentes) -> None:
     """
     for t in fu.transferencias:
         clave = (_texto(t.get("sku")), _texto(t.get("tienda_destino")))
+        salida = _fecha(t.get("fecha_salida_cedis"))
         fu.transferencias_por.setdefault(clave, []).append((
             _fecha(t.get("fecha_generacion")),
-            _fecha(t.get("fecha_salida_cedis")),
+            salida,
             _fecha(t.get("fecha_recepcion_tienda")),
         ))
+        # La ola se llavea por CEDIS + tienda, no por SKU: es el embarque, y
+        # en él cabe cualquier producto.
+        if salida:
+            fu.olas_por.setdefault(
+                (_texto(t.get("cedis_origen")), clave[1]), set()).add(salida)
 
     for p in fu.pedidos_tienda:
         # `origen` es quién generó el pedido: la tienda, o el proceso central
@@ -897,6 +909,46 @@ def clave_catalogo(v) -> str:
 
 VIAS = {clave_catalogo(v.value): v for v in ViaResurtido}
 TIPOS_RESURTIDO = {clave_catalogo(t.value): t for t in TipoResurtido}
+
+
+def derivar_ultima_ola(fu: Fuentes, cedis, tienda, D) -> Optional[date]:
+    """La última fecha en que ese CEDIS surtió a esa tienda, al día D.
+
+    Definición de La Comer (2026-09-21). Una ola es una salida de mercancía
+    del CEDIS hacia la tienda —de cualquier SKU—, o sea la última oportunidad
+    que tuvo el CEDIS de mandar este producto.
+
+    None cuando no hay ninguna salida previa, o cuando no hay hoja de
+    transferencias con qué saberlo.
+    """
+    if not cedis or fu.vacia("CEDIS_TRANSFERENCIAS"):
+        return None
+    fechas = fu.olas_por.get((cedis, tienda))
+    if not fechas:
+        return None
+    return max((f for f in fechas if f <= D), default=None)
+
+
+def existencia_cedis_en(fu: Fuentes, sku, cedis, D) -> Optional[int]:
+    """Existencia disponible del SKU en el CEDIS al día D, ya descontado lo
+    reservado. None = no se sabe.
+
+    Se extrajo de derivar_evidencias para poder preguntarlo dos veces: por el
+    día del faltante y por el día de la última ola. Ver CEDIS_AUSENCIA_ES_CERO.
+    """
+    if not cedis or D is None:
+        return None
+    inv = fu.inv_cedis.get((sku, cedis, D))
+    if inv is not None:
+        existencia = _entero(inv.get("existencia_piezas"))
+        if existencia is None:
+            return None
+        return max(0, existencia - (_entero(inv.get("piezas_reservadas")) or 0))
+    if CEDIS_AUSENCIA_ES_CERO and fu.cedis_cubre(cedis, D):
+        # El reporte omite los SKU en cero, así que en un día extraído la
+        # ausencia es un cero confirmado.
+        return 0
+    return None
 
 
 def derivar_transito_vigente(fu: Fuentes, sku, tienda, D) -> Optional[bool]:
@@ -1213,16 +1265,15 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
                 inv_cierre_descartado += 1
 
         inv_c = fu.inv_cedis.get((sku, cedis, D)) if cedis else None
-        existencia_cedis = None
-        if inv_c is not None:
-            existencia_cedis = _entero(inv_c.get("existencia_piezas"))
-            reservadas = _entero(inv_c.get("piezas_reservadas")) or 0
-            existencia_cedis = max(0, existencia_cedis - reservadas)
-        elif CEDIS_AUSENCIA_ES_CERO and fu.cedis_cubre(cedis, D):
-            # El reporte omite los SKU en cero, así que en un día extraído la
-            # ausencia es un cero confirmado. Ver CEDIS_AUSENCIA_ES_CERO.
-            existencia_cedis = 0
+        existencia_cedis = existencia_cedis_en(fu, sku, cedis, D)
+        if inv_c is None and existencia_cedis == 0:
             cedis_derivado += 1
+
+        # Lo que juzga la prioridad 5 en Vía 1: el inventario que el CEDIS
+        # tenía cuando salió el último embarque a esta tienda. Ver
+        # USAR_ULTIMA_OLA_CEDIS en el motor.
+        fecha_ola = derivar_ultima_ola(fu, cedis, tienda, D)
+        existencia_cedis_ola = existencia_cedis_en(fu, sku, cedis, fecha_ola)
 
         # La venta perdida manda desde BOPS_OSA: es quien mide cuánto tiempo
         # estuvo vacío el anaquel, y viene para todos los días con faltante.
@@ -1273,6 +1324,8 @@ def derivar_evidencias(fu: Fuentes, umbral_osa: float) -> List[EvidenciaSKUTiend
             pedido_dsd_generado=pedido_dsd,
             dsd_entrego_tienda=entrego_dsd,
             inventario_cedis=existencia_cedis,
+            inventario_cedis_ola=existencia_cedis_ola,
+            fecha_ola=fecha_ola,
             envio_cedis_generado=derivar_envio_generado(fu, sku, tienda, D),
             pedido_proveedor_generado=orden.existe,
             proveedor_cajas_pedidas=orden.cajas_pedidas,

@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +266,57 @@ REFINAR_RC01_CON_ALERTA = True
 # de doce, once piezas es ficticio y doce no.
 # ---------------------------------------------------------------------------
 PARTIR_INVENTARIO_FICTICIO = True
+
+# ---------------------------------------------------------------------------
+# QUÉ INVENTARIO DE CEDIS SE JUZGA   (La Comer, 2026-09-21 — regla nueva)
+#
+# La prioridad 5 preguntaba por la existencia en CEDIS EL DÍA DEL FALTANTE, y
+# para Vía 1 esa no es la pregunta. Vía 1 es el CEDIS que RESGUARDA
+# inventario: lo que decide si falló es si lo tenía cuando salió el último
+# embarque a esa tienda —su última oportunidad de mandarlo—, no si lo tiene
+# hoy. Un CEDIS puede haber recibido producto ayer y el faltante de hoy no ser
+# suyo, o haberlo tenido el martes, no haberlo mandado, y habérsele acabado.
+#
+# La ola = la última fecha en que ese CEDIS surtió a esa tienda, de cualquier
+# SKU (definición de Samuel con La Comer). Ver derivar_ultima_ola.
+#
+# Sin ola previa se cae al inventario del día, que es lo que se hacía antes:
+# no se deja de contestar por falta de embarques.
+#
+# CUÁNTO MUEVE: medido en las 5 tiendas de marzo, 3 días y $268. No es que la
+# regla sea débil —el dato es bueno, hay ola previa para el 100% de los días y
+# queda a 0.6 días de distancia en promedio— sino que casi no hay Vía 1 a la
+# cual aplicarla: de los 94,113 renglones de CATALOGO sólo 377 son Vía 1, y en
+# todo marzo hay 154 días con faltante de esa vía. Su peso depende por
+# completo de cuánta Vía 1 traiga el catálogo de verdad.
+# ---------------------------------------------------------------------------
+USAR_ULTIMA_OLA_CEDIS = True
+
+# ---------------------------------------------------------------------------
+# ¿SOLO VÍA 1 PREGUNTA POR EL INVENTARIO DE CEDIS?   PENDIENTE DE RATIFICAR
+#
+# El árbol nuevo dibuja "¿El producto es Vía 1?" como COMPUERTA: lo que no es
+# Vía 1 se saltaría la pregunta del CEDIS y pasaría directo a juzgar al
+# proveedor. Tiene lógica —Vía 2 es cross-dock y no resguarda inventario, así
+# que preguntar por su existencia en CEDIS no significa gran cosa—, PERO
+# contradice lo que el equipo ya había confirmado con La Comer el 2026-08-05 y
+# que está escrito en ViaResurtido: Vía 1 y Vía 2 comparten las reglas 5-8.
+#
+# POR QUÉ SE ENTREGA APAGADA. Medido en las 5 tiendas de marzo, prenderla
+# mueve 1,135 días y $51,213 a la rama del proveedor. Y 851 de esos días son
+# RC02 "Transporte": días en que CEDIS SÍ tenía el producto y SÍ generó el
+# envío. Decir que el proveedor falló justo cuando la mercancía ya iba en
+# camino es una afirmación que el dato contradice, y no se hace sin que La
+# Comer la ratifique.
+#
+#   False  el comportamiento ratificado el 2026-08-05: Vía 1 y Vía 2
+#          preguntan las dos por el CEDIS. RC04 = 297 días, RC02 = 857.
+#   True   la compuerta tal como la dibuja el árbol nuevo. RC04 = 13 días,
+#          RC02 = 6, y 1,135 días se van al proveedor.
+#
+# Se cambia una palabra cuando contesten.
+# ---------------------------------------------------------------------------
+SOLO_VIA_1_PREGUNTA_CEDIS = False
 
 
 # ---------------------------------------------------------------------------
@@ -537,6 +588,14 @@ class EvidenciaSKUTienda:
     # --- Prioridades 5-6 (Vía 1): CEDIS               Fuente: Inv. CEDIS + Transferencias
     inventario_cedis: Optional[int] = None
     envio_cedis_generado: Optional[bool] = None
+
+    # --- Prioridad 5, refinamiento: la última ola.   Fuente: Transferencias
+    # Existencia en CEDIS el día en que salió el último embarque a esta
+    # tienda, y de cuándo fue. None = no hubo embarque previo, o no se sabe:
+    # entonces se juzga con el inventario del día, como antes. Ver
+    # USAR_ULTIMA_OLA_CEDIS.
+    inventario_cedis_ola: Optional[int] = None
+    fecha_ola: Optional[date] = None
 
     # --- Prioridades 7-8 (Vía 1): proveedor a CEDIS   Fuente: NS / Recibos / Citas
     pedido_proveedor_generado: Optional[bool] = None
@@ -812,6 +871,42 @@ class R4_BifurcacionVia(Regla):
         return None
 
 
+def inventario_cedis_a_juzgar(ev) -> Tuple[Optional[int], str]:
+    """Qué existencia de CEDIS juzga este día, y de cuándo es.
+
+    En Vía 1 la pregunta es la de la ola: el CEDIS resguarda inventario, y lo
+    que decide si falló es si lo tenía cuando salió el último embarque a esa
+    tienda. En Vía 2 no hay resguardo que mirar hacia atrás, así que se queda
+    con el día del faltante. Ver USAR_ULTIMA_OLA_CEDIS.
+
+    Sin ola previa se cae al inventario del día: es mejor contestar con lo de
+    hoy que no contestar.
+    """
+    if (USAR_ULTIMA_OLA_CEDIS
+            and ev.via_resurtido is ViaResurtido.VIA_1
+            and ev.inventario_cedis_ola is not None):
+        cuando = (f" en la última ola del {ev.fecha_ola.isoformat()}"
+                  if ev.fecha_ola else " en la última ola")
+        return ev.inventario_cedis_ola, cuando
+    return ev.inventario_cedis, ""
+
+
+def cedis_quedo_en_cero(ev) -> bool:
+    """¿Se agotó la rama de CEDIS y toca juzgar al proveedor?
+
+    Existe para que las prioridades 5 y 7 no puedan desalinearse. Tienen que
+    mirar EXACTAMENTE el mismo inventario: si la 5 deja pasar un día por estar
+    en cero y la 7 lo rechaza por estar en más que cero, ese día no lo toma
+    ninguna regla y sale sin clasificar. Pasó al introducir la ola —la 5 ya
+    miraba la ola y la 7 seguía mirando el día— y lo cachó la prueba de humo.
+    """
+    if SOLO_VIA_1_PREGUNTA_CEDIS and ev.via_resurtido is not ViaResurtido.VIA_1:
+        # Cross-dock: no hay resguardo que evaluar, se pasa al proveedor.
+        return True
+    inventario, _ = inventario_cedis_a_juzgar(ev)
+    return inventario is not None and inventario <= 0
+
+
 class R5_R6_RamaCedis(Regla):
     """Prioridades 5 y 6 — Vía 1 o Vía 2 con inventario en CEDIS.
 
@@ -824,14 +919,28 @@ class R5_R6_RamaCedis(Regla):
         if ev.via_resurtido not in (ViaResurtido.VIA_1, ViaResurtido.VIA_2):
             return None
 
-        if ev.inventario_cedis is None:
-            return Indeterminado(self.prioridad, ["inventario_cedis"], list(ctx))
-
-        if ev.inventario_cedis <= 0:
-            ctx.append("Inventario en CEDIS = 0")
+        # Ver SOLO_VIA_1_PREGUNTA_CEDIS. Apagado por omisión.
+        if SOLO_VIA_1_PREGUNTA_CEDIS and ev.via_resurtido is not ViaResurtido.VIA_1:
+            ctx.append("Vía 2 (cross-dock): el CEDIS no resguarda inventario")
             return None
 
-        base = ctx + [f"Inventario en CEDIS = {ev.inventario_cedis} (> 0)"]
+        inventario, cuando = inventario_cedis_a_juzgar(ev)
+
+        if inventario is None:
+            return Indeterminado(self.prioridad, ["inventario_cedis"], list(ctx))
+
+        if inventario <= 0:
+            ctx.append(f"Inventario en CEDIS = 0{cuando}")
+            return None
+
+        base = ctx + [f"Inventario en CEDIS = {inventario} (> 0){cuando}"]
+
+        # La coletilla repite de dónde salió la cifra en el ULTIMO renglón de
+        # evidencia, que es el único que el Excel y run_dias guardan en
+        # `detalle`. Sin ella, esa fila muestra inventario_cedis = 0 —la
+        # columna guarda el del día— junto a un veredicto que dice que CEDIS
+        # sí tenía, y quien audite lo lee como un error del modelo.
+        coletilla = f"; tenía {inventario} piezas{cuando}" if cuando else ""
 
         if ev.envio_cedis_generado is None:
             return Indeterminado(self.prioridad, ["envio_cedis_generado"], base)
@@ -840,13 +949,14 @@ class R5_R6_RamaCedis(Regla):
             return Dictamen(
                 5, "RC04", CausaRaiz.RC04, Responsable.CEDIS,
                 "Inventario CEDIS + Transferencias",
-                base + ["CEDIS no generó envío a tienda"],
+                base + [f"CEDIS no generó envío a tienda{coletilla}"],
             )
 
         return Dictamen(
             6, "RC02", CausaRaiz.RC02, Responsable.LOGISTICA,
             "Transferencias",
-            base + ["Envío generado desde CEDIS, producto no llegó a anaquel"],
+            base + [f"Envío generado desde CEDIS, producto no llegó a "
+                    f"anaquel{coletilla}"],
         )
 
 
@@ -870,7 +980,8 @@ class R7_R8_RamaProveedorCedis(Regla):
     def evalua(self, ev, ctx):
         if ev.via_resurtido not in (ViaResurtido.VIA_1, ViaResurtido.VIA_2):
             return None
-        if ev.inventario_cedis is None or ev.inventario_cedis > 0:
+        # La MISMA pregunta que contestó la prioridad 5. Ver cedis_quedo_en_cero.
+        if not cedis_quedo_en_cero(ev):
             return None
 
         if ev.pedido_proveedor_generado is None:

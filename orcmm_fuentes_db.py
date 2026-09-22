@@ -55,8 +55,12 @@ COLUMNAS = {
     "TABLEAU_VENTAS": ["sku", "tienda", "fecha", "importe_venta", "unidades_vendidas",
                        "venta_perdida_estimada"],
     "CEDIS_INVENTARIO": ["sku", "cedis", "fecha", "existencia_piezas", "piezas_reservadas"],
-    "CEDIS_TRANSFERENCIAS": ["folio", "sku", "tienda_destino", "fecha_generacion",
-                             "fecha_salida_cedis", "fecha_recepcion_tienda"],
+    # cedis_origen es la llave de la ola: sin el, olas_por queda llaveado por
+    # (None, tienda) y derivar_ultima_ola nunca encuentra nada. Ver
+    # USAR_ULTIMA_OLA_CEDIS.
+    "CEDIS_TRANSFERENCIAS": ["folio", "sku", "cedis_origen", "tienda_destino",
+                             "fecha_generacion", "fecha_salida_cedis",
+                             "fecha_recepcion_tienda"],
     # Las cantidades son el insumo de nivel_servicio_tienda, no del motor.
     "SIMA_PEDIDOS_TIENDA": ["folio", "sku", "origen", "fecha_pedido", "fecha_surtido",
                             "cantidad_pedida_piezas", "cantidad_surtida_piezas"],

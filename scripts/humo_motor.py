@@ -104,6 +104,29 @@ caso("Con pedido y sin cita -> incumplimiento del proveedor", "RC06", "Proveedor
      **comun, inventario_cedis=0, pedido_proveedor_generado=True,
      proveedor_cajas_pedidas=10, proveedor_cita_agendada=False)
 
+print("\nPrioridad 5 — qué inventario de CEDIS se juzga")
+# Ver USAR_ULTIMA_OLA_CEDIS. En Vía 1 el CEDIS resguarda inventario, así que
+# lo que decide es si lo tenía cuando salió el último embarque a esa tienda,
+# no si lo tiene el día del faltante.
+_cedis = dict(inventario_tienda=0, transito_vigente=False,
+              pedido_tienda_generado=True, envio_cedis_generado=False)
+caso("Vía 1: tenía en la ola aunque hoy no -> CEDIS", "RC04", "CEDIS",
+     **_cedis, via_resurtido=ViaResurtido.VIA_1,
+     inventario_cedis=0, inventario_cedis_ola=80, fecha_ola=date(2026, 3, 18))
+caso("Vía 1: no tenía en la ola aunque hoy sí -> sigue el árbol", "RC05",
+     "Compras / Abasto",
+     **_cedis, via_resurtido=ViaResurtido.VIA_1,
+     inventario_cedis=80, inventario_cedis_ola=0, fecha_ola=date(2026, 3, 18),
+     pedido_proveedor_generado=False)
+# Sin ola previa no se deja de contestar: se juzga con el día, como antes.
+caso("Vía 1 sin ola previa -> se juzga con el día", "RC04", "CEDIS",
+     **_cedis, via_resurtido=ViaResurtido.VIA_1,
+     inventario_cedis=80, inventario_cedis_ola=None)
+# Vía 2 es cross-dock: no hay resguardo que mirar hacia atrás.
+caso("Vía 2 se queda con el inventario del día", "RC04", "CEDIS",
+     **_cedis, via_resurtido=ViaResurtido.VIA_2,
+     inventario_cedis=80, inventario_cedis_ola=0, fecha_ola=date(2026, 3, 18))
+
 print("\nRama DSD — estaba muerta hasta el 2026-08-21")
 dsd = dict(inventario_tienda=0, transito_vigente=False, pedido_tienda_generado=True,
            via_resurtido=ViaResurtido.DSD, pedido_dsd_generado=True)
@@ -299,6 +322,43 @@ if PROPAGAR_RC06:
           f"{d.get('root_cause_id_original')} -> {d.get('root_cause_id')}")
     if faltan:
         FALLOS.append(f"Trazabilidad incompleta: {faltan}")
+
+
+# ---------------------------------------------------------------------------
+# La compuerta de Via 1 se ENTREGA APAGADA (ver SOLO_VIA_1_PREGUNTA_CEDIS).
+# Se prueba prendiendola a proposito, para que el dia que La Comer la ratifique
+# ya se sepa que hace, y para que nadie la prenda creyendo que no cambia nada.
+# ---------------------------------------------------------------------------
+import orcmm_rca_engine as _motor
+
+print("\nLa compuerta de Via 1 (se entrega apagada)")
+CASOS[0] += 1
+_ev = EvidenciaSKUTienda(
+    sku="X", tienda="287", fecha=date(2026, 3, 20), osa=0.0, venta_perdida=100.0,
+    en_catalogo=True, inventario_tienda=0, transito_vigente=False,
+    pedido_tienda_generado=True, via_resurtido=ViaResurtido.VIA_2,
+    inventario_cedis=80, envio_cedis_generado=False,
+    pedido_proveedor_generado=False)
+_apagada = MOTOR.diagnosticar(_ev).get("causa_base")
+_motor.SOLO_VIA_1_PREGUNTA_CEDIS = True
+try:
+    _prendida = MOTOR.diagnosticar(_ev).get("causa_base")
+finally:
+    _motor.SOLO_VIA_1_PREGUNTA_CEDIS = False
+_ok = _apagada == "RC04" and _prendida == "RC05"
+print(f"  {'ok  ' if _ok else 'MAL '} "
+      f"{'Via 2 con inventario: apagada RC04, prendida pasa al proveedor':<52} "
+      f"{_apagada} -> {_prendida}")
+if not _ok:
+    FALLOS.append(f"la compuerta dio {_apagada}/{_prendida}, esperaba RC04/RC05")
+
+CASOS[0] += 1
+_reset = _motor.SOLO_VIA_1_PREGUNTA_CEDIS is False
+print(f"  {'ok  ' if _reset else 'MAL '} "
+      f"{'La compuerta queda apagada al terminar la prueba':<52} "
+      f"{_motor.SOLO_VIA_1_PREGUNTA_CEDIS}")
+if not _reset:
+    FALLOS.append("la prueba dejo SOLO_VIA_1_PREGUNTA_CEDIS prendida")
 
 
 if FALLOS:
